@@ -7,8 +7,6 @@ REPO_URL="https://github.com/evanderkoogh/broadleaf-demosite.git"
 PID_FILE="$SCRIPT_DIR/.broadleaf.pids"
 LOG_DIR="$SCRIPT_DIR/logs"
 MAVEN_OPTS_VAL="-Xmx1g"
-AGENT_JAR="$SCRIPT_DIR/otel/opentelemetry-javaagent.jar"
-AGENT_URL="https://github.com/open-telemetry/opentelemetry-java-instrumentation/releases/latest/download/opentelemetry-javaagent.jar"
 
 # Load .env if present
 if [[ -f "$SCRIPT_DIR/.env" ]]; then
@@ -27,19 +25,7 @@ usage() {
   echo "  status          Show whether servers are running"
   echo "  reset [--purge]  Check out 'clean' and create a new dated scratch branch."
   echo "                   With --purge, also delete the current branch locally and remotely."
-  echo "  download-agent   Download the OpenTelemetry Java agent"
   exit 1
-}
-
-cmd_download_agent() {
-  if [[ -f "$AGENT_JAR" ]]; then
-    echo "OTel agent already present at $AGENT_JAR — skipping."
-    return
-  fi
-  mkdir -p "$(dirname "$AGENT_JAR")"
-  echo "Downloading OpenTelemetry Java agent..."
-  curl -L -o "$AGENT_JAR" "$AGENT_URL"
-  echo "Agent saved to $AGENT_JAR"
 }
 
 cmd_download() {
@@ -91,29 +77,22 @@ cmd_start() {
     exit 1
   fi
 
-  local otel_env=()
-  if [[ -f "$AGENT_JAR" ]]; then
-    if [[ -z "${HONEYCOMB_API_KEY:-}" ]]; then
-      echo "Warning: HONEYCOMB_API_KEY not set — OTel agent will run but not export to Honeycomb."
-      echo "  Set it in the environment or in $SCRIPT_DIR/.env"
-    fi
-    otel_env=(
-      "JAVA_TOOL_OPTIONS=-javaagent:$AGENT_JAR"
-      "OTEL_EXPORTER_OTLP_ENDPOINT=https://api.honeycomb.io"
-      "OTEL_EXPORTER_OTLP_HEADERS=x-honeycomb-team=${HONEYCOMB_API_KEY:-}"
-    )
-  fi
-
   echo "Starting site on port 8080..."
-  env "${otel_env[@]}" OTEL_SERVICE_NAME="broadleaf-site" \
+  if [[ -x "$DEMO_DIR/start-site.sh" ]]; then
+    MAVEN_OPTS="$MAVEN_OPTS_VAL" "$DEMO_DIR/start-site.sh" > "$LOG_DIR/site.log" 2>&1 &
+  else
     MAVEN_OPTS="$MAVEN_OPTS_VAL" mvn -f "$DEMO_DIR/site/pom.xml" spring-boot:run \
-    > "$LOG_DIR/site.log" 2>&1 &
+      > "$LOG_DIR/site.log" 2>&1 &
+  fi
   SITE_PID=$!
 
   echo "Starting admin on port 8081..."
-  env "${otel_env[@]}" OTEL_SERVICE_NAME="broadleaf-admin" \
+  if [[ -x "$DEMO_DIR/start-admin.sh" ]]; then
+    MAVEN_OPTS="$MAVEN_OPTS_VAL" "$DEMO_DIR/start-admin.sh" > "$LOG_DIR/admin.log" 2>&1 &
+  else
     MAVEN_OPTS="$MAVEN_OPTS_VAL" mvn -f "$DEMO_DIR/admin/pom.xml" spring-boot:run \
-    > "$LOG_DIR/admin.log" 2>&1 &
+      > "$LOG_DIR/admin.log" 2>&1 &
+  fi
   ADMIN_PID=$!
 
   echo "$SITE_PID $ADMIN_PID" > "$PID_FILE"
@@ -234,7 +213,6 @@ case "${1:-}" in
   stop)     cmd_stop ;;
   restart)  cmd_stop; cmd_start ;;
   status)   cmd_status ;;
-  reset)           cmd_reset "${2:-}" ;;
-  download-agent)  cmd_download_agent ;;
-  *)               usage ;;
+  reset)   cmd_reset "${2:-}" ;;
+  *)       usage ;;
 esac
