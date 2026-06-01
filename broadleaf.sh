@@ -15,10 +15,12 @@ if [[ -f "$SCRIPT_DIR/.env" ]]; then
 fi
 
 usage() {
-  echo "Usage: $0 {download|build|start|stop|restart|status|reset [--purge]|clean}"
+  echo "Usage: $0 {download|build|bootstrap|start|stop|restart|status|reset [--purge]|clean}"
   echo ""
   echo "  download        Clone the DemoSite repo (skips if already present)"
   echo "  build           Build all modules (skips tests)"
+  echo "  bootstrap       Seed the HSQLDB schema via mvn spring-boot:run (run once after build"
+  echo "                   or after /tmp is cleared). Required before the first 'start'."
   echo "  start           Start site (port 8080) and admin (port 8081) in background"
   echo "  stop            Stop running servers"
   echo "  restart         Stop then start"
@@ -56,6 +58,43 @@ port_in_use() {
   lsof -ti tcp:"$1" > /dev/null 2>&1
 }
 
+cmd_bootstrap() {
+  # Broadleaf's embedded HSQLDB needs one mvn spring-boot:run pass to create the correct
+  # schema (entity extension adds columns that are missed on a completely fresh database).
+  # Run this once after build or after /tmp is cleared. Subsequent starts use java -cp.
+  if [[ -d /tmp/broadleaf-hsqldb ]]; then
+    echo "HSQLDB already seeded at /tmp/broadleaf-hsqldb — skipping bootstrap."
+    echo "Delete /tmp/broadleaf-hsqldb to force a re-seed."
+    return
+  fi
+
+  mkdir -p "$LOG_DIR"
+  local bootstrap_log="$LOG_DIR/bootstrap.log"
+
+  echo "Bootstrapping HSQLDB schema via mvn spring-boot:run (this takes ~60s)..."
+  MAVEN_OPTS="$MAVEN_OPTS_VAL" mvn -f "$DEMO_DIR/site/pom.xml" spring-boot:run \
+    > "$bootstrap_log" 2>&1 &
+  local pid=$!
+
+  until grep -q "Started SiteApplication" "$bootstrap_log" 2>/dev/null; do
+    sleep 3
+    if ! kill -0 "$pid" 2>/dev/null; then
+      echo "Bootstrap failed. Check $bootstrap_log" >&2
+      exit 1
+    fi
+  done
+
+  kill "$pid"
+  local waited=0
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 1
+    (( ++waited ))
+    if (( waited >= 30 )); then kill -9 "$pid" 2>/dev/null || true; break; fi
+  done
+
+  echo "Bootstrap complete. HSQLDB schema seeded at /tmp/broadleaf-hsqldb."
+}
+
 cmd_start() {
   if [[ ! -f "$DEMO_DIR/site/target/site.jar" && ! -d "$DEMO_DIR/site/target/classes" ]]; then
     echo "Build artifacts not found. Run '$0 build' first." >&2
@@ -89,7 +128,7 @@ cmd_start() {
 
   # Wait for site to fully start (and bring up embedded Solr) before launching admin
   echo "Waiting for site to boot..."
-  until grep -q "Started " "$LOG_DIR/site.log" 2>/dev/null; do
+  until grep -q "Started SiteApplication" "$LOG_DIR/site.log" 2>/dev/null; do
     sleep 3
     if ! kill -0 "$SITE_PID" 2>/dev/null; then
       echo "Site process died. Check $LOG_DIR/site.log" >&2
@@ -109,7 +148,7 @@ cmd_start() {
 
   echo "$SITE_PID $ADMIN_PID" > "$PID_FILE"
 
-  until grep -q "Started " "$LOG_DIR/admin.log" 2>/dev/null; do
+  until grep -q "Started AdminApplication" "$LOG_DIR/admin.log" 2>/dev/null; do
     sleep 3
     if ! kill -0 "$ADMIN_PID" 2>/dev/null; then
       echo "Admin process died. Check $LOG_DIR/admin.log" >&2
@@ -140,6 +179,20 @@ cmd_stop() {
       echo "Stopping PID $PID..."
       kill "$PID"
     fi
+  done
+
+  # Wait for processes to fully exit so ports are released before returning
+  for PID in $SITE_PID $ADMIN_PID; do
+    local waited=0
+    while kill -0 "$PID" 2>/dev/null; do
+      sleep 1
+      (( ++waited ))
+      if (( waited >= 30 )); then
+        echo "PID $PID did not stop within 30s — sending SIGKILL"
+        kill -9 "$PID" 2>/dev/null || true
+        break
+      fi
+    done
   done
 
   rm -f "$PID_FILE"
@@ -217,11 +270,12 @@ cmd_status() {
 }
 
 case "${1:-}" in
-  download) cmd_download ;;
-  build)    cmd_build ;;
-  start)    cmd_start ;;
+  download)  cmd_download ;;
+  build)     cmd_build ;;
+  bootstrap) cmd_bootstrap ;;
+  start)     cmd_start ;;
   stop)     cmd_stop ;;
-  restart)  cmd_stop; cmd_start ;;
+  restart)  cmd_stop; cmd_clean; cmd_start ;;
   status)   cmd_status ;;
   reset)   cmd_reset "${2:-}" ;;
   clean)   cmd_clean ;;
