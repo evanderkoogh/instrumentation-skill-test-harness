@@ -9,9 +9,13 @@ Each session simulates a fresh instrumentation engagement on the Broadleaf Comme
 ## Workflow
 
 1. `./broadleaf.sh reset --purge` — discard the current scratch branch (local + remote) and create a fresh `scratch_YYYY-MM-DD` branch from the `clean` baseline
-2. Invoke the OTel instrumentation skill and apply changes to `DemoSite/`
-3. Build and run the demo to verify telemetry is flowing
-4. Repeat from step 1
+2. `./broadleaf.sh build` — build all modules
+3. `./broadleaf.sh bootstrap` — seed the HSQLDB schema (required on first run and after `/tmp` is cleared, e.g. after a system restart; skipped automatically if already seeded)
+4. Invoke the OTel instrumentation skill and apply changes to `DemoSite/`
+5. `./broadleaf.sh start` — start site and admin; verify telemetry is flowing
+6. Repeat from step 1
+
+> **Note on bootstrap:** The embedded HSQLDB stores its files under `/tmp/broadleaf-hsqldb`. These survive normal session restarts but are cleared on system reboot. `bootstrap` seeds the schema via `mvn spring-boot:run` once so subsequent `start` commands can use the faster `java -cp` (exploded JAR) path. If `start` fails with a schema-related error, run `bootstrap` again.
 
 ## Key facts
 
@@ -23,12 +27,15 @@ Each session simulates a fresh instrumentation engagement on the Broadleaf Comme
 
 ## Running the DemoSite
 
-Always use `broadleaf.sh` to manage the DemoSite servers — never start or stop them directly with Maven or `java -jar`:
+Always use `broadleaf.sh` to manage the DemoSite — never invoke Maven or Java directly:
 
+- `./broadleaf.sh build` — build all modules (skips tests)
+- `./broadleaf.sh bootstrap` — seed HSQLDB schema (once after build or system reboot)
 - `./broadleaf.sh start` — start site (port 8080) and admin (port 8081) in the background
 - `./broadleaf.sh stop` — stop running servers
-- `./broadleaf.sh restart` — stop then start
+- `./broadleaf.sh restart` — stop, clean logs, then start
 - `./broadleaf.sh status` — check whether servers are running
+- `./broadleaf.sh clean` — remove logs and Playwright session artifacts
 
 ## Browsing the DemoSite
 
