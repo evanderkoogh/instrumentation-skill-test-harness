@@ -1,10 +1,26 @@
-# Broadleaf OTel Skill Test Harness
+# OTel Skill Test Harness
 
-This project exists to repeatedly test Claude's OpenTelemetry instrumentation skills against a real Java/Spring Boot codebase.
+This project exists to repeatedly test Claude's OpenTelemetry instrumentation skills against real application codebases in various languages and frameworks.
+
+## Structure
+
+```
+apps/
+  broadleaf/          # Broadleaf Commerce DemoSite (Java/Spring Boot)
+    config.sh         # App-specific variables and start/stop/build hooks
+    traffic.sh        # Traffic generation script
+    instrument-preamble.md  # App-specific intro injected into the agent prompt
+    EVALUATION.md     # Evaluation checklist for this app
+    DemoSite/         # Cloned app code (gitignored)
+harness.sh            # Main orchestration: ./harness.sh <app> <command>
+broadleaf.sh          # Thin wrapper: ./broadleaf.sh <cmd> → ./harness.sh broadleaf <cmd>
+```
+
+To add a new app, create `apps/<name>/` with `config.sh`, `traffic.sh`, `instrument-preamble.md`, and `EVALUATION.md`. No changes to shared harness code required.
 
 ## Purpose
 
-Each session simulates a fresh instrumentation engagement on the Broadleaf Commerce DemoSite. The scripts in this repo exist to quickly reset the DemoSite to a clean, pre-instrumentation state so the same skill can be re-tested without leftover changes from a previous run.
+Each session simulates a fresh instrumentation engagement on a target application. The scripts in this repo exist to quickly reset the target to a clean, pre-instrumentation state so the same skill can be re-tested without leftover changes from a previous run.
 
 ## Workflow
 
@@ -12,10 +28,10 @@ Each session simulates a fresh instrumentation engagement on the Broadleaf Comme
 2. `./broadleaf.sh build` — build all modules
 3. `./broadleaf.sh bootstrap` — seed the HSQLDB schema (required on first run and after `/tmp` is cleared, e.g. after a system restart; skipped automatically if already seeded)
 4. `./broadleaf.sh instrument` — generate `.instrument-prompt.md`, then spawn a clean-context `Agent` with that prompt (see **Applying OTel Instrumentation** below)
-5. Write `DemoSite/.skill-version` and `DemoSite/INSTRUMENTATION.md` (see below)
+5. Write `apps/broadleaf/DemoSite/.skill-version` and `apps/broadleaf/DemoSite/INSTRUMENTATION.md` (see below)
 6. `./broadleaf.sh start` — start site and admin
 7. `./broadleaf.sh traffic` — generate representative traffic across key paths
-8. Evaluate against `EVALUATION.md` using Honeycomb queries
+8. Evaluate against `apps/broadleaf/EVALUATION.md` using Honeycomb queries
 9. Repeat from step 1
 
 > **Note on bootstrap:** The embedded HSQLDB stores its files under `/tmp/broadleaf-hsqldb`. These survive normal session restarts but are cleared on system reboot. `bootstrap` seeds the schema via `mvn spring-boot:run` once so subsequent `start` commands can use the faster `java -cp` (exploded JAR) path. If `start` fails with a schema-related error, run `bootstrap` again.
@@ -32,17 +48,18 @@ Instead:
 
 The agent starts with no conversation history and no accumulated session knowledge — only what the skill says and its base training.
 
-## Key facts
+## Key facts (Broadleaf)
 
 - **DemoSite** is a Maven multi-module Spring Boot app (Spring Boot 2.7.x, Java 17+)
 - Modules: `core`, `site` (port 8080), `admin` (port 8081), `api` (port 8082)
+- App code lives at: `apps/broadleaf/DemoSite/`
 - Default database: embedded HSQLDB — no external services needed
 - The `clean` branch in the fork (`evanderkoogh/broadleaf-demosite`) is the unmodified upstream baseline; never commit instrumentation changes there
 - Scratch branches (`scratch_YYYY-MM-DD[-N]`) are the working branches for each test run
 
 ## Running the DemoSite
 
-Always use `broadleaf.sh` to manage the DemoSite — never invoke Maven or Java directly:
+Always use `broadleaf.sh` (or `harness.sh broadleaf`) to manage the DemoSite — never invoke Maven or Java directly:
 
 - `./broadleaf.sh download` — clone the DemoSite repo (skips if already present)
 - `./broadleaf.sh download-agent` — download the OTel Java agent jar to `otel/`
@@ -62,4 +79,13 @@ Use the **Playwright MCP** tools (`playwright_navigate`, `playwright_screenshot`
 
 ## Constraints
 
-**All OpenTelemetry instrumentation changes must be made inside `DemoSite/` only.** The root-level directory is the test harness and must never be modified as part of an instrumentation task. If an instrumentation skill tries to create or edit files outside `DemoSite/`, that is a mistake.
+**All OpenTelemetry instrumentation changes must be made inside `apps/broadleaf/DemoSite/` only.** The root-level directory and `apps/broadleaf/` config files are the test harness and must never be modified as part of an instrumentation task. If an instrumentation skill tries to create or edit files outside `apps/broadleaf/DemoSite/`, that is a mistake.
+
+## Adding a new app
+
+1. `mkdir apps/<name>`
+2. Create `apps/<name>/config.sh` — set `APP_NAME`, `APP_REPO`, `APP_CLEAN_BRANCH`, `APP_OTEL_AGENT_TYPE`, and define `cmd_build()`, `cmd_start()` (and optionally `cmd_bootstrap()`, `cmd_status()`)
+3. Create `apps/<name>/traffic.sh` — standalone script that generates traffic against the running app
+4. Create `apps/<name>/instrument-preamble.md` — app-specific intro injected before the skill content; use `%REPO_DIR%`, `%API_KEY%`, `%OTLP_ENDPOINT%` as substitution placeholders
+5. Create `apps/<name>/EVALUATION.md` — evaluation checklist for verifying instrumentation quality
+6. Run `./harness.sh <name> download` to clone the repo

@@ -1,6 +1,7 @@
-DemoSite/
+apps/*/DemoSite/
 logs/
 otel/
+.harness.pids
 .broadleaf.pids
 .env
 .playwright-mcp/
