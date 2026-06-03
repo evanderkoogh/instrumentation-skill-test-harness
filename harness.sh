@@ -196,6 +196,7 @@ harness_reset() {
     echo "Switching to $clean_branch before purge..."
     git -C "$REPO_DIR" checkout "$clean_branch"
     git -C "$REPO_DIR" clean -fd
+    find "$REPO_DIR" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
     echo "Deleting local branch '$current_branch'..."
     git -C "$REPO_DIR" branch -D "$current_branch"
     if git -C "$REPO_DIR" ls-remote --exit-code origin "$current_branch" &>/dev/null; then
@@ -207,6 +208,7 @@ harness_reset() {
   else
     git -C "$REPO_DIR" checkout "$clean_branch"
     git -C "$REPO_DIR" clean -fd
+    find "$REPO_DIR" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
   fi
   local scratch_branch
   scratch_branch="$(make_scratch_branch)"
