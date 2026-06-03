@@ -5,3 +5,4 @@ otel/
 .env
 .playwright-mcp/
 otelcol-*.ndjson
+.instrument-prompt.md

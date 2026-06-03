@@ -11,10 +11,12 @@ Each session simulates a fresh instrumentation engagement on the Broadleaf Comme
 1. `./broadleaf.sh reset --purge` — discard the current scratch branch (local + remote) and create a fresh `scratch_YYYY-MM-DD` branch from the `clean` baseline
 2. `./broadleaf.sh build` — build all modules
 3. `./broadleaf.sh bootstrap` — seed the HSQLDB schema (required on first run and after `/tmp` is cleared, e.g. after a system restart; skipped automatically if already seeded)
-4. Spawn a **clean-context instrumentation agent** (see below) — this is the step under test
-5. Write `DemoSite/.skill-version` with the skill repo branch and short SHA, and write `DemoSite/INSTRUMENTATION.md` recording the skill version and the prompt that triggered this session
-6. `./broadleaf.sh start` — start site and admin; verify telemetry is flowing
-7. Repeat from step 1
+4. `./broadleaf.sh instrument` — generate `.instrument-prompt.md`, then spawn a clean-context `Agent` with that prompt (see **Applying OTel Instrumentation** below)
+5. Write `DemoSite/.skill-version` and `DemoSite/INSTRUMENTATION.md` (see below)
+6. `./broadleaf.sh start` — start site and admin
+7. `./broadleaf.sh traffic` — generate representative traffic across key paths
+8. Evaluate against `EVALUATION.md` using Honeycomb queries
+9. Repeat from step 1
 
 > **Note on bootstrap:** The embedded HSQLDB stores its files under `/tmp/broadleaf-hsqldb`. These survive normal session restarts but are cleared on system reboot. `bootstrap` seeds the schema via `mvn spring-boot:run` once so subsequent `start` commands can use the faster `java -cp` (exploded JAR) path. If `start` fails with a schema-related error, run `bootstrap` again.
 
@@ -22,31 +24,13 @@ Each session simulates a fresh instrumentation engagement on the Broadleaf Comme
 
 **Never use the `Skill` tool inline for instrumentation.** It runs with full conversation context, which defeats the purpose of testing the skill in isolation.
 
-Instead, spawn a subagent using the `Agent` tool. The agent starts with no conversation history and no accumulated session knowledge — only what the skill says and its base training.
+Instead:
 
-**Agent prompt template:**
+1. Run `./broadleaf.sh instrument` — this generates `.instrument-prompt.md` with the full skill content (resolving `${CLAUDE_PLUGIN_ROOT}`) and the API key from `.env`
+2. Read `.instrument-prompt.md`
+3. Spawn an `Agent` using that content as the prompt
 
-```
-You are applying OpenTelemetry instrumentation to the Broadleaf Commerce DemoSite — a Maven multi-module Spring Boot 2.7.x application. Your only guide is the skill content below. Do not use knowledge from any other source about how this specific project has been instrumented before.
-
-The working directory is: /Users/evanderkoogh/projects/honeycomb/scratch_dir/broadleaf/DemoSite
-
-CONSTRAINT: All changes must be made inside DemoSite/ only.
-
-HONEYCOMB_API_KEY: <paste key>
-OTLP_ENDPOINT: https://api.honeycomb.io
-
----
-<paste full content of /Users/evanderkoogh/.claude/plugins/cache/honeycomb-plugins/honeycomb/1.1.0/skills/otel-instrumentation/SKILL.md>
----
-
-Reference files the skill points to are at:
-/Users/evanderkoogh/.claude/plugins/cache/honeycomb-plugins/honeycomb/1.1.0/skills/otel-instrumentation/references/
-
-Apply instrumentation to this codebase now. Read the codebase first, then follow the skill.
-```
-
-The agent will read the skill's reference files directly (it has full file access), explore the codebase, and apply instrumentation without any of this session's context.
+The agent starts with no conversation history and no accumulated session knowledge — only what the skill says and its base training.
 
 ## Key facts
 
@@ -60,12 +44,16 @@ The agent will read the skill's reference files directly (it has full file acces
 
 Always use `broadleaf.sh` to manage the DemoSite — never invoke Maven or Java directly:
 
+- `./broadleaf.sh download` — clone the DemoSite repo (skips if already present)
+- `./broadleaf.sh download-agent` — download the OTel Java agent jar to `otel/`
 - `./broadleaf.sh build` — build all modules (skips tests)
 - `./broadleaf.sh bootstrap` — seed HSQLDB schema (once after build or system reboot)
+- `./broadleaf.sh instrument` — generate `.instrument-prompt.md` for clean-context agent
 - `./broadleaf.sh start` — start site (port 8080) and admin (port 8081) in the background
 - `./broadleaf.sh stop` — stop running servers
 - `./broadleaf.sh restart` — stop, clean logs, then start
 - `./broadleaf.sh status` — check whether servers are running
+- `./broadleaf.sh traffic` — generate representative traffic across key site paths
 - `./broadleaf.sh clean` — remove logs and Playwright session artifacts
 
 ## Browsing the DemoSite

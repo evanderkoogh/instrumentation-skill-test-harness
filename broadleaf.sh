@@ -15,9 +15,10 @@ if [[ -f "$SCRIPT_DIR/.env" ]]; then
 fi
 
 usage() {
-  echo "Usage: $0 {download|build|bootstrap|start|stop|restart|status|reset [--purge]|clean}"
+  echo "Usage: $0 {download|download-agent|build|bootstrap|start|stop|restart|status|reset [--purge]|clean|traffic|instrument}"
   echo ""
   echo "  download        Clone the DemoSite repo (skips if already present)"
+  echo "  download-agent  Download the OTel Java agent jar to otel/"
   echo "  build           Build all modules (skips tests)"
   echo "  bootstrap       Seed the HSQLDB schema via mvn spring-boot:run (run once after build"
   echo "                   or after /tmp is cleared). Required before the first 'start'."
@@ -28,7 +29,22 @@ usage() {
   echo "  reset [--purge]  Check out 'clean' and create a new dated scratch branch."
   echo "                   With --purge, also delete the current branch locally and remotely."
   echo "  clean           Remove logs/ and .playwright-mcp/ directories"
+  echo "  traffic         Generate representative HTTP traffic against the running site"
+  echo "  instrument      Write .instrument-prompt.md — the clean-context agent prompt"
   exit 1
+}
+
+cmd_download_agent() {
+  local agent_jar="$SCRIPT_DIR/otel/opentelemetry-javaagent.jar"
+  if [[ -f "$agent_jar" ]]; then
+    echo "Agent already present: $agent_jar ($(du -sh "$agent_jar" | cut -f1))"
+    return 0
+  fi
+  mkdir -p "$SCRIPT_DIR/otel"
+  echo "Downloading OpenTelemetry Java agent..."
+  curl -L -o "$agent_jar" \
+    https://github.com/open-telemetry/opentelemetry-java-instrumentation/releases/latest/download/opentelemetry-javaagent.jar
+  echo "Downloaded: $(du -sh "$agent_jar" | cut -f1) -> $agent_jar"
 }
 
 cmd_download() {
@@ -96,9 +112,17 @@ cmd_bootstrap() {
 }
 
 cmd_start() {
-  if [[ ! -f "$DEMO_DIR/site/target/site.jar" && ! -d "$DEMO_DIR/site/target/classes" ]]; then
+  if [[ ! -f "$DEMO_DIR/site/target/site.jar" && ! -d "$DEMO_DIR/site/target/classes" && ! -f "$DEMO_DIR/site/target/ROOT.jar" ]]; then
     echo "Build artifacts not found. Run '$0 build' first." >&2
     exit 1
+  fi
+
+  # If the start scripts reference the OTel agent, ensure it has been downloaded
+  if grep -q "opentelemetry-javaagent.jar" "$DEMO_DIR/start-site.sh" 2>/dev/null; then
+    if [[ ! -f "$SCRIPT_DIR/otel/opentelemetry-javaagent.jar" ]]; then
+      echo "OTel agent not found. Run '$0 download-agent' first." >&2
+      exit 1
+    fi
   fi
 
   mkdir -p "$LOG_DIR"
@@ -258,6 +282,100 @@ cmd_clean() {
   echo "Clean complete."
 }
 
+cmd_traffic() {
+  if ! port_in_use 8443; then
+    echo "Site is not running on port 8443. Run '$0 start' first." >&2
+    exit 1
+  fi
+
+  local base="https://localhost:8443"
+  local paths=(
+    "/"
+    "/hot-sauces"
+    "/hot-sauces?page=2"
+    "/hot-sauces/hoppin_hot_sauce"
+    "/hot-sauces/day_of_the_dead_chipotle_hot_sauce"
+    "/hot-sauces/armageddon_hot_sauce_to_end_all"
+    "/hot-sauces/green_ghost"
+    "/merchandise"
+    "/cart"
+    "/search?q=hot"
+    "/search?q=cajun"
+  )
+
+  echo "Generating traffic against $base..."
+  for path in "${paths[@]}"; do
+    printf "  GET %-50s" "$path"
+    curl -sk -o /dev/null -w "%{http_code} (%{time_total}s)\n" --insecure "$base$path" || echo "FAILED"
+  done
+  echo "Done. Allow ~10s for spans to flush to Honeycomb."
+}
+
+cmd_instrument() {
+  # Locate the plugin root by resolving the version symlink
+  local plugin_base="$HOME/.claude/plugins/cache/honeycomb-plugins/honeycomb"
+  local latest_version
+  latest_version=$(ls "$plugin_base" | sort -V | tail -1)
+  local plugin_link="$plugin_base/$latest_version"
+  local claude_plugin_root
+  if [[ -L "$plugin_link" ]]; then
+    claude_plugin_root=$(readlink "$plugin_link")
+  else
+    claude_plugin_root="$plugin_link"
+  fi
+
+  local skill_file="$claude_plugin_root/skills/otel-instrumentation/SKILL.md"
+  if [[ ! -f "$skill_file" ]]; then
+    echo "Skill not found at: $skill_file" >&2
+    exit 1
+  fi
+
+  # Get API key from .env
+  local api_key="YOUR_API_KEY"
+  if [[ -f "$SCRIPT_DIR/.env" ]]; then
+    local headers_line
+    headers_line=$(grep "^OTEL_EXPORTER_OTLP_HEADERS=" "$SCRIPT_DIR/.env" || true)
+    if [[ -n "$headers_line" ]]; then
+      api_key="${headers_line##*=}"
+    fi
+  fi
+
+  # Resolve ${CLAUDE_PLUGIN_ROOT} in skill content
+  local skill_content
+  skill_content=$(sed "s|\${CLAUDE_PLUGIN_ROOT}|$claude_plugin_root|g" "$skill_file")
+
+  # Get skill git info
+  local skill_branch skill_sha
+  skill_branch=$(git -C "$claude_plugin_root" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+  skill_sha=$(git -C "$claude_plugin_root" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+
+  local prompt_file="$SCRIPT_DIR/.instrument-prompt.md"
+  cat > "$prompt_file" <<PROMPT
+You are applying OpenTelemetry instrumentation to the Broadleaf Commerce DemoSite — a
+Maven multi-module Spring Boot 2.7.x application (Java). Your only guide is the skill
+content below. Do not use prior knowledge of how this specific project has been
+instrumented before.
+
+Working directory: $DEMO_DIR
+CONSTRAINT: All changes must be made inside $DEMO_DIR only.
+
+OTEL_EXPORTER_OTLP_ENDPOINT=https://api.honeycomb.io
+OTEL_EXPORTER_OTLP_HEADERS=x-honeycomb-team=$api_key
+
+---
+$skill_content
+---
+
+Explore the DemoSite codebase, then apply instrumentation following the skill above.
+PROMPT
+
+  echo "Agent prompt written to: $prompt_file"
+  echo "Skill: $skill_branch @ $skill_sha (plugin version: $latest_version)"
+  echo ""
+  echo "Next: spawn a clean-context Agent using the Agent tool, with the contents"
+  echo "of $prompt_file as the prompt."
+}
+
 cmd_status() {
   if [[ ! -f "$PID_FILE" ]]; then
     echo "Servers are not running (no PID file)."
@@ -270,14 +388,17 @@ cmd_status() {
 }
 
 case "${1:-}" in
-  download)  cmd_download ;;
-  build)     cmd_build ;;
-  bootstrap) cmd_bootstrap ;;
-  start)     cmd_start ;;
-  stop)     cmd_stop ;;
-  restart)  cmd_stop; cmd_clean; cmd_start ;;
-  status)   cmd_status ;;
-  reset)   cmd_reset "${2:-}" ;;
-  clean)   cmd_clean ;;
-  *)       usage ;;
+  download)        cmd_download ;;
+  download-agent)  cmd_download_agent ;;
+  build)           cmd_build ;;
+  bootstrap)       cmd_bootstrap ;;
+  start)           cmd_start ;;
+  stop)            cmd_stop ;;
+  restart)         cmd_stop; cmd_clean; cmd_start ;;
+  status)          cmd_status ;;
+  reset)           cmd_reset "${2:-}" ;;
+  clean)           cmd_clean ;;
+  traffic)         cmd_traffic ;;
+  instrument)      cmd_instrument ;;
+  *)               usage ;;
 esac
