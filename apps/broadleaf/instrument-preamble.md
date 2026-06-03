@@ -9,3 +9,14 @@ CONSTRAINT: All changes must be made inside %REPO_DIR% only.
 
 OTEL_EXPORTER_OTLP_ENDPOINT=%OTLP_ENDPOINT%
 OTEL_EXPORTER_OTLP_HEADERS=x-honeycomb-team=%API_KEY%
+
+## Directory structure note
+
+The OTel Java agent jar lives at `%REPO_DIR%/../../../otel/opentelemetry-javaagent.jar`
+(three levels up from DemoSite, not two). If you create `start-site.sh` or
+`start-admin.sh`, use that path:
+
+```bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+OTEL_AGENT="$SCRIPT_DIR/../../../otel/opentelemetry-javaagent.jar"
+```
