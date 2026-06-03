@@ -12,7 +12,8 @@ Each session simulates a fresh instrumentation engagement on the Broadleaf Comme
 2. `./broadleaf.sh build` — build all modules
 3. `./broadleaf.sh bootstrap` — seed the HSQLDB schema (required on first run and after `/tmp` is cleared, e.g. after a system restart; skipped automatically if already seeded)
 4. Invoke the OTel instrumentation skill and apply changes to `DemoSite/`
-5. `./broadleaf.sh start` — start site and admin; verify telemetry is flowing
+5. Write `DemoSite/.skill-version` with the skill repo branch and short SHA, and write `DemoSite/INSTRUMENTATION.md` recording the skill version and the prompt that triggered this session
+6. `./broadleaf.sh start` — start site and admin; verify telemetry is flowing
 6. Repeat from step 1
 
 > **Note on bootstrap:** The embedded HSQLDB stores its files under `/tmp/broadleaf-hsqldb`. These survive normal session restarts but are cleared on system reboot. `bootstrap` seeds the schema via `mvn spring-boot:run` once so subsequent `start` commands can use the faster `java -cp` (exploded JAR) path. If `start` fails with a schema-related error, run `bootstrap` again.
