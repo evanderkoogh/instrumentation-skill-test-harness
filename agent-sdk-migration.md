@@ -17,16 +17,16 @@ useful for developing the skill but has three problems:
    The SDK version must treat any startup failure as a hard failed run, not a manual-fix
    opportunity.
 
-The migration replaces human orchestration with a Python script using the Claude Code
+The migration replaces human orchestration with a TypeScript script using the Claude Code
 Agent SDK. The bash scripts (`harness.sh`) stay unchanged.
 
 ---
 
 ## Resolved Decisions
 
-- **Language**: Python. Subprocess calls, httpx for Honeycomb API, uv for deps.
-- **Evaluation**: Direct Honeycomb REST API calls — no second agent.
-- **Scope**: Single-run first; loop mode as a second milestone.
+- **Language**: TypeScript (Node.js 22, already in `.tool-versions`)
+- **Evaluation**: Direct Honeycomb REST API calls — no second agent
+- **Scope**: Single-run first; loop mode as a second milestone
 - **Failure policy**: If `harness.sh <app> start` exits non-zero, the run is recorded as
   FAILED and stops. No patching, no retry.
 
@@ -35,7 +35,7 @@ Agent SDK. The bash scripts (`harness.sh`) stay unchanged.
 ## Target Architecture
 
 ```
-run.py <app> [--skill-branch BRANCH]
+run.ts <app> [--skill-branch BRANCH]
 │
 ├── harness("reset", "--purge")
 ├── harness("build")
@@ -49,7 +49,7 @@ run.py <app> [--skill-branch BRANCH]
 │
 ├── harness("start")              # EXIT 1 → record FAILED, stop
 ├── harness("traffic")
-├── sleep(15)                     # allow spans to flush
+├── sleep(15_000)                 # allow spans to flush
 │
 ├── Honeycomb REST API ── evaluation
 │   ├── common criteria from EVALUATION.md
@@ -65,154 +65,186 @@ run.py <app> [--skill-branch BRANCH]
 ### Step 1 — Project setup
 
 ```bash
-uv init run
-uv add claude-code-sdk httpx python-dotenv
+npm init -y
+npm install @anthropic-ai/claude-code dotenv
+npm install -D typescript @types/node tsx
+npx tsc --init
 ```
 
 Load env from `.env` (already has `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_EXPORTER_OTLP_ENDPOINT`).
 
+Run with: `npx tsx run.ts beaverhabits`
+
 ### Step 2 — Subprocess wrapper
 
-```python
-import subprocess, sys
-from pathlib import Path
+```typescript
+import { execFileSync, spawnSync } from "child_process";
+import { resolve } from "path";
 
-HARNESS = Path(__file__).parent / "harness.sh"
+const HARNESS = resolve(__dirname, "harness.sh");
 
-def harness(app: str, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-    result = subprocess.run(
-        [str(HARNESS), app, *args],
-        capture_output=True, text=True
-    )
-    if check and result.returncode != 0:
-        raise HarnessError(f"harness.sh {app} {args} failed:\n{result.stderr}")
-    return result
+class HarnessError extends Error {}
+class StartupFailure extends Error {}
 
-class HarnessError(Exception):
-    pass
+function harness(app: string, ...args: string[]): string {
+  const result = spawnSync(HARNESS, [app, ...args], {
+    encoding: "utf8",
+    stdio: ["inherit", "pipe", "pipe"],
+  });
+  if (result.status !== 0) {
+    throw new HarnessError(
+      `harness.sh ${app} ${args.join(" ")} failed:\n${result.stderr}`
+    );
+  }
+  return result.stdout;
+}
 
-class StartupFailure(Exception):
-    """Raised when start exits non-zero — signals a failed instrumentation run."""
-    pass
-```
-
-For `start`, use `check=False` and inspect returncode explicitly:
-
-```python
-result = harness(app, "start", check=False)
-if result.returncode != 0:
-    raise StartupFailure(result.stderr)
+function harnessStart(app: string): void {
+  const result = spawnSync(HARNESS, [app, "start"], {
+    encoding: "utf8",
+    stdio: ["inherit", "pipe", "pipe"],
+  });
+  if (result.status !== 0) {
+    throw new StartupFailure(result.stderr);
+  }
+}
 ```
 
 ### Step 3 — Instrumentation agent
 
-```python
-from claude_code_sdk import query, ClaudeCodeOptions
-import time
+```typescript
+import { query, type ClaudeCodeOptions } from "@anthropic-ai/claude-code";
+import { readFileSync } from "fs";
 
-async def run_instrumentation(app: str, api_key: str) -> dict:
-    prompt = (Path(".instrument-prompt.md")).read_text()
-    repo_dir = Path(f"apps/{app}/DemoSite")
+interface AgentMetrics {
+  duration_ms: number;
+  tool_uses: number;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+}
 
-    start = time.monotonic()
-    tool_uses = 0
-    input_tokens = output_tokens = 0
+async function runInstrumentation(
+  app: string,
+  apiKey: string
+): Promise<AgentMetrics> {
+  const prompt = readFileSync(".instrument-prompt.md", "utf8");
+  const repoDir = resolve(`apps/${app}/DemoSite`);
 
-    async for event in query(
-        prompt=prompt,
-        options=ClaudeCodeOptions(
-            allowed_tools=["Read", "Write", "Edit", "Bash"],
-            cwd=str(repo_dir),
-            max_turns=100,          # beaverhabits runs used up to 37, broadleaf up to 61
-            env={
-                "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
-                "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA": "1",
-                "OTEL_TRACES_EXPORTER": "otlp",
-                "OTEL_EXPORTER_OTLP_ENDPOINT": "https://api.honeycomb.io",
-                "OTEL_EXPORTER_OTLP_HEADERS": f"x-honeycomb-team={api_key}",
-                "OTEL_SERVICE_NAME": f"{app}-instrumentation",
-            },
-        )
-    ):
-        # print tool calls to stdout for visibility
-        handle_event(event)
-        # accumulate usage from events
+  const start = Date.now();
+  let toolUses = 0;
+  let inputTokens = 0;
+  let outputTokens = 0;
 
-    return {
-        "duration_ms": int((time.monotonic() - start) * 1000),
-        "tool_uses": tool_uses,
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "total_tokens": input_tokens + output_tokens,
+  for await (const event of query({
+    prompt,
+    options: {
+      allowedTools: ["Read", "Write", "Edit", "Bash"],
+      cwd: repoDir,
+      maxTurns: 100,               // beaverhabits peaks at 37, broadleaf at 61
+      env: {
+        CLAUDE_CODE_ENABLE_TELEMETRY: "1",
+        CLAUDE_CODE_ENHANCED_TELEMETRY_BETA: "1",
+        OTEL_TRACES_EXPORTER: "otlp",
+        OTEL_EXPORTER_OTLP_ENDPOINT: "https://api.honeycomb.io",
+        OTEL_EXPORTER_OTLP_HEADERS: `x-honeycomb-team=${apiKey}`,
+        OTEL_SERVICE_NAME: `${app}-instrumentation`,
+      },
+    } satisfies ClaudeCodeOptions,
+  })) {
+    // log tool calls for visibility, accumulate usage
+    handleEvent(event, { onToolUse: () => toolUses++ });
+    if (event.type === "result") {
+      inputTokens = event.usage?.input_tokens ?? 0;
+      outputTokens = event.usage?.output_tokens ?? 0;
     }
+  }
+
+  return {
+    duration_ms: Date.now() - start,
+    tool_uses: toolUses,
+    input_tokens: inputTokens,
+    output_tokens: outputTokens,
+    total_tokens: inputTokens + outputTokens,
+  };
+}
 ```
 
 ### Step 4 — Evaluation via Honeycomb REST API
 
-```python
-import httpx, time
+```typescript
+interface QuerySpec {
+  calculations: Array<{ op: string; column?: string }>;
+  filters?: Array<{ column: string; op: string; value?: unknown }>;
+  breakdowns?: string[];
+  time_range?: string;
+}
 
-def run_honeycomb_query(dataset: str, query_spec: dict, api_key: str,
-                         env: str = "test", time_range: str = "15m") -> list[dict]:
-    base = "https://api.honeycomb.io/1"
-    headers = {"X-Honeycomb-Team": api_key}
+async function runHoneycombQuery(
+  dataset: string,
+  querySpec: QuerySpec,
+  apiKey: string,
+  env = "test"
+): Promise<Record<string, unknown>[]> {
+  const base = "https://api.honeycomb.io/1";
+  const headers = { "X-Honeycomb-Team": apiKey };
 
-    # Create query
-    r = httpx.post(f"{base}/queries/{dataset}", headers=headers,
-                   json={"query": {**query_spec, "time_range": time_range},
-                         "limit": 100})
-    r.raise_for_status()
-    query_id = r.json()["id"]
+  const createRes = await fetch(`${base}/queries/${dataset}`, {
+    method: "POST",
+    headers: { ...headers, "Content-Type": "application/json" },
+    body: JSON.stringify({ query: { ...querySpec, time_range: "15m" }, limit: 100 }),
+  });
+  const { id: queryId } = (await createRes.json()) as { id: string };
 
-    # Poll for results
-    for _ in range(20):
-        r = httpx.get(f"{base}/query_results/{query_id}",
-                      headers={**headers, "X-Honeycomb-Environment": env})
-        r.raise_for_status()
-        data = r.json()
-        if data.get("complete"):
-            return data.get("data", {}).get("results", [])
-        time.sleep(1)
-
-    raise TimeoutError("Honeycomb query timed out")
+  for (let i = 0; i < 20; i++) {
+    await sleep(1000);
+    const res = await fetch(`${base}/query_results/${queryId}`, {
+      headers: { ...headers, "X-Honeycomb-Environment": env },
+    });
+    const data = (await res.json()) as { complete: boolean; data?: { results: unknown[] } };
+    if (data.complete) return (data.data?.results ?? []) as Record<string, unknown>[];
+  }
+  throw new Error("Honeycomb query timed out");
+}
 ```
 
-App-specific dataset names come from `apps/<app>/config.sh` (e.g. `OTEL_SERVICE_NAME`).
-
 Common criteria (from root `EVALUATION.md`):
-- `check_spans_arriving` — COUNT > 0
-- `check_http_routes` — server spans with `http.route` exists, not just `/*`
-- `check_db_spans` — `db.system` exists
-- `check_skill_version` — `service.instrumentation_skill.branch` exists
-- `check_rootless_traces` — COUNT with `none.trace.parent_id does-not-exist` + `any.trace.parent_id exists` == 0
-- `check_no_explosion` — top span name count < threshold
+- `checkSpansArriving` — COUNT > 0
+- `checkHttpRoutes` — server spans with `http.route` exists, not just `/*`
+- `checkDbSpans` — `db.system` exists
+- `checkSkillVersion` — `service.instrumentation_skill.branch` exists
+- `checkRootlessTraces` — COUNT with `none.trace.parent_id does-not-exist` + `any.trace.parent_id exists` == 0
+- `checkNoExplosion` — top span name count < threshold
 
-App-specific criteria loaded from `apps/<app>/EVALUATION.md` (parsed or hardcoded per app).
+### Step 5 — Failure handling and main flow
 
-### Step 5 — Failure handling
+```typescript
+async function run(app: string): Promise<void> {
+  harness(app, "reset", "--purge");
+  harness(app, "build");
+  harness(app, "bootstrap");      // no-op if not needed
+  harness(app, "instrument");
 
-```python
-async def run(app: str):
-    harness(app, "reset", "--purge")
-    harness(app, "build")
-    harness(app, "bootstrap")      # no-op if not needed
-    harness(app, "instrument")
+  const agentMetrics = await runInstrumentation(app, apiKey);
 
-    agent_metrics = await run_instrumentation(app, api_key)
+  try {
+    harnessStart(app);
+  } catch (err) {
+    if (err instanceof StartupFailure) {
+      recordRun(app, { agentMetrics, failed: true, failureReason: err.message });
+      return;
+    }
+    throw err;
+  }
 
-    try:
-        harness(app, "start", check=False)  # raises StartupFailure on exit 1
-    except StartupFailure as e:
-        record_run(app, agent_metrics, failed=True, failure_reason=str(e))
-        return
+  harness(app, "traffic");
+  await sleep(15_000);
 
-    harness(app, "traffic")
-    time.sleep(15)
+  const criteria = await evaluate(app, apiKey);
+  recordRun(app, { agentMetrics, criteria });
 
-    criteria = evaluate(app, api_key)
-    record_run(app, agent_metrics, criteria=criteria)
-
-    harness(app, "stop")
+  harness(app, "stop");
+}
 ```
 
 ### Step 6 — runs.jsonl record
@@ -251,14 +283,15 @@ Failed runs include `"failed": true, "failure_reason": "..."` and no `criteria` 
 ## File Structure
 
 ```
-run.py                        # Entry point: python run.py <app>
-lib/
-  harness.py                  # subprocess wrappers, HarnessError, StartupFailure
-  instrumentation.py          # SDK agent invocation + event handling + metric capture
-  evaluation.py               # Honeycomb REST API helpers + criterion check functions
-  metrics.py                  # runs.jsonl append + stdout summary
+run.ts                        # Entry point: npx tsx run.ts <app>
+src/
+  harness.ts                  # subprocess wrappers, HarnessError, StartupFailure
+  instrumentation.ts          # SDK agent invocation + event handling + metric capture
+  evaluation.ts               # Honeycomb REST API helpers + criterion check functions
+  metrics.ts                  # runs.jsonl append + stdout summary
 runs.jsonl                    # Append-only run history (gitignored)
-requirements.txt              # or pyproject.toml: claude-code-sdk, httpx, python-dotenv
+package.json
+tsconfig.json
 ```
 
 ---
@@ -266,8 +299,8 @@ requirements.txt              # or pyproject.toml: claude-code-sdk, httpx, pytho
 ## What the Bash Scripts Don't Change
 
 `harness.sh` stays identical. The SDK calls it as subprocesses. The `instrument` command
-still generates `.instrument-prompt.md` and writes `.skill-version` — the SDK reads
-those files rather than generating them itself.
+still generates `.instrument-prompt.md` and writes `.skill-version` — the TypeScript
+script reads those files rather than generating them itself.
 
 The pre-start checks in `apps/<app>/config.sh` (e.g. async SQLAlchemy detection) run as
 part of `harness.sh <app> start` — their exit codes propagate to `StartupFailure`.
@@ -276,17 +309,17 @@ part of `harness.sh <app> start` — their exit codes propagate to `StartupFailu
 
 ## Verification
 
-1. `python run.py beaverhabits` completes without human input
-2. `python run.py beaverhabits` with a broken agent (missing `.sync_engine`) records a
-   FAILED run in `runs.jsonl` and stops — no patching
+1. `npx tsx run.ts beaverhabits` completes without human input
+2. Running with a broken agent (missing `.sync_engine`) records a FAILED run in
+   `runs.jsonl` and stops — no patching
 3. Instrumentation agent spans appear in `beaverhabits-instrumentation` dataset in Honeycomb
 4. Two consecutive runs produce independent records in `runs.jsonl`
-5. `python run.py broadleaf` works with the same script (bootstrap handled by harness)
+5. `npx tsx run.ts broadleaf` works with the same script (bootstrap handled by harness)
 
 ---
 
 ## Out of Scope (future milestones)
 
-- Loop mode: `python run.py beaverhabits --runs 5` to aggregate scores across iterations
-- CI integration: run on a schedule and post results to Slack/Linear
+- Loop mode: `npx tsx run.ts beaverhabits --runs 5`
+- CI integration: scheduled runs posting results to Slack/Linear
 - Skill branch sweep: run same app against multiple skill commits and diff results
