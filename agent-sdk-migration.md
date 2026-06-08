@@ -2,212 +2,291 @@
 
 ## Context
 
-The current harness runs the instrumentation workflow interactively — a human (via Claude Code) manually sequences each step, reads the instrument prompt, spawns the instrumentation agent via the `Agent` tool, then runs queries in Honeycomb to evaluate results. This works but has two limitations:
+The current harness runs the instrumentation workflow interactively — a human manually
+sequences each step, spawns the instrumentation agent via the Claude Code `Agent` tool,
+patches any agent mistakes, runs Honeycomb queries, and records results. This has been
+useful for developing the skill but has three problems:
 
-1. **No per-agent telemetry**: The instrumentation subagent's traces (tool calls, reasoning, file edits) can't be routed to a separate Honeycomb dataset because Claude Code doesn't pass OTEL env vars to child processes. The Agent SDK _does_ support per-call OTEL config.
-2. **Not automatable**: Each test run requires a human to drive each step. Running multiple iterations unattended (e.g. overnight across skill versions) isn't possible today.
+1. **No per-agent telemetry**: The instrumentation subagent's traces can't route to a
+   separate Honeycomb dataset (Claude Code doesn't pass OTEL env vars to child processes).
+   The Agent SDK supports per-call OTEL config.
+2. **Not automatable**: Multiple iterations overnight, or across skill branches, require
+   a human at each step.
+3. **Manual patching masks failures**: When the agent produces broken code (e.g. missing
+   `.sync_engine`), the human patches and continues — hiding a real skill quality failure.
+   The SDK version must treat any startup failure as a hard failed run, not a manual-fix
+   opportunity.
 
-The migration replaces the "human in the loop" orchestration with a Python or TypeScript program using the Claude Code Agent SDK. The bash scripts (`harness.sh`, `broadleaf.sh`) stay unchanged — they remain the right layer for process management.
+The migration replaces human orchestration with a Python script using the Claude Code
+Agent SDK. The bash scripts (`harness.sh`) stay unchanged.
+
+---
+
+## Resolved Decisions
+
+- **Language**: Python. Subprocess calls, httpx for Honeycomb API, uv for deps.
+- **Evaluation**: Direct Honeycomb REST API calls — no second agent.
+- **Scope**: Single-run first; loop mode as a second milestone.
+- **Failure policy**: If `harness.sh <app> start` exits non-zero, the run is recorded as
+  FAILED and stops. No patching, no retry.
 
 ---
 
 ## Target Architecture
 
 ```
-run.py  (or run.ts)
+run.py <app> [--skill-branch BRANCH]
 │
-├── subprocess: ./broadleaf.sh reset --purge
-├── subprocess: ./broadleaf.sh build
-├── subprocess: ./broadleaf.sh bootstrap
-├── subprocess: ./broadleaf.sh instrument        # generates .instrument-prompt.md
+├── harness("reset", "--purge")
+├── harness("build")
+├── harness("bootstrap")          # no-op for apps that don't need it
+├── harness("instrument")         # writes .instrument-prompt.md + .skill-version
 │
-├── SDK query() ── instrumentation agent          # OTEL → "broadleaf-instrumentation-agent" dataset
-│   └── tools: filesystem read/write in apps/broadleaf/DemoSite/
+├── SDK query() ── instrumentation agent
+│   ├── OTEL → "{app}-instrumentation" dataset in Honeycomb
+│   ├── cwd = apps/<app>/DemoSite
+│   └── captures: duration_ms, tool_uses, input_tokens, output_tokens
 │
-├── subprocess: ./broadleaf.sh start
-├── subprocess: ./broadleaf.sh traffic
+├── harness("start")              # EXIT 1 → record FAILED, stop
+├── harness("traffic")
+├── sleep(15)                     # allow spans to flush
 │
-├── Honeycomb API (or SDK query()) ── evaluation  # OTEL → "broadleaf-evaluation-agent" dataset (optional)
-│   └── run queries from EVALUATION.md criteria
+├── Honeycomb REST API ── evaluation
+│   ├── common criteria from EVALUATION.md
+│   └── app-specific criteria from apps/<app>/EVALUATION.md
 │
-└── output: structured results (pass/fail per criterion, JSON report)
+└── append to runs.jsonl
 ```
-
----
-
-## Key Decisions Before Starting
-
-1. **Language**: Python or TypeScript? Python is simpler for subprocess calls and data wrangling. TypeScript has first-class SDK support. Pick one and stick with it.
-
-2. **Evaluation approach**: Direct Honeycomb REST API calls (simpler, no agent needed) vs. spawning a second Claude agent with the Honeycomb MCP (more flexible, higher cost). Recommend starting with direct API calls.
-
-3. **Single run vs. loop**: Start with a single-run script. The loop (repeat N times across skill versions) is a second milestone.
-
-4. **Report format**: JSON file + stdout summary is sufficient for now.
 
 ---
 
 ## Implementation Steps
 
-### Step 1 — SDK setup
-- Install the SDK: `pip install claude-code-sdk` or `npm install @anthropic-ai/claude-code`
-- Verify with a minimal "hello world" agent call
-- Check which tool permissions are needed for filesystem access
+### Step 1 — Project setup
 
-**Reference**: https://docs.anthropic.com/en/docs/claude-code/sdk
+```bash
+uv init run
+uv add claude-code-sdk httpx python-dotenv
+```
+
+Load env from `.env` (already has `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_EXPORTER_OTLP_ENDPOINT`).
 
 ### Step 2 — Subprocess wrapper
-Write helpers that call `harness.sh` commands and check exit codes:
-```python
-def harness(app, *args, check=True):
-    result = subprocess.run(["./harness.sh", app, *args], capture_output=True, text=True)
-    if check and result.returncode != 0:
-        raise RuntimeError(f"harness.sh {app} {args} failed:\n{result.stderr}")
-    return result
-```
-
-### Step 3 — Instrumentation agent invocation
-Read `.instrument-prompt.md` (generated by `./broadleaf.sh instrument`) and pass it to `query()` with per-call OTEL config:
 
 ```python
-prompt = Path(".instrument-prompt.md").read_text()
+import subprocess, sys
+from pathlib import Path
 
-async for event in query(
-    prompt=prompt,
-    options=ClaudeCodeOptions(
-        allowed_tools=["Read", "Write", "Edit", "Bash"],
-        cwd="apps/broadleaf/DemoSite",
-        env={
-            "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
-            "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA": "1",
-            "OTEL_TRACES_EXPORTER": "otlp",
-            "OTEL_EXPORTER_OTLP_ENDPOINT": "https://api.honeycomb.io",
-            "OTEL_EXPORTER_OTLP_HEADERS": f"x-honeycomb-team={api_key}",
-            "OTEL_SERVICE_NAME": "broadleaf-instrumentation-agent",
-        },
-        max_turns=50,
+HARNESS = Path(__file__).parent / "harness.sh"
+
+def harness(app: str, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+    result = subprocess.run(
+        [str(HARNESS), app, *args],
+        capture_output=True, text=True
     )
-):
-    handle_event(event)  # stream tool calls and text to stdout
+    if check and result.returncode != 0:
+        raise HarnessError(f"harness.sh {app} {args} failed:\n{result.stderr}")
+    return result
+
+class HarnessError(Exception):
+    pass
+
+class StartupFailure(Exception):
+    """Raised when start exits non-zero — signals a failed instrumentation run."""
+    pass
 ```
 
-Key unknowns to resolve here:
-- Exact `allowed_tools` list needed (at minimum: `Read`, `Write`, `Edit`, `Bash`)
-- Whether `cwd` scoping is sufficient to enforce the CONSTRAINT, or whether an explicit system prompt addition is needed
-- Whether `max_turns=50` is enough (previous agent run used ~61 tool calls)
+For `start`, use `check=False` and inspect returncode explicitly:
+
+```python
+result = harness(app, "start", check=False)
+if result.returncode != 0:
+    raise StartupFailure(result.stderr)
+```
+
+### Step 3 — Instrumentation agent
+
+```python
+from claude_code_sdk import query, ClaudeCodeOptions
+import time
+
+async def run_instrumentation(app: str, api_key: str) -> dict:
+    prompt = (Path(".instrument-prompt.md")).read_text()
+    repo_dir = Path(f"apps/{app}/DemoSite")
+
+    start = time.monotonic()
+    tool_uses = 0
+    input_tokens = output_tokens = 0
+
+    async for event in query(
+        prompt=prompt,
+        options=ClaudeCodeOptions(
+            allowed_tools=["Read", "Write", "Edit", "Bash"],
+            cwd=str(repo_dir),
+            max_turns=100,          # beaverhabits runs used up to 37, broadleaf up to 61
+            env={
+                "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+                "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA": "1",
+                "OTEL_TRACES_EXPORTER": "otlp",
+                "OTEL_EXPORTER_OTLP_ENDPOINT": "https://api.honeycomb.io",
+                "OTEL_EXPORTER_OTLP_HEADERS": f"x-honeycomb-team={api_key}",
+                "OTEL_SERVICE_NAME": f"{app}-instrumentation",
+            },
+        )
+    ):
+        # print tool calls to stdout for visibility
+        handle_event(event)
+        # accumulate usage from events
+
+    return {
+        "duration_ms": int((time.monotonic() - start) * 1000),
+        "tool_uses": tool_uses,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+    }
+```
 
 ### Step 4 — Evaluation via Honeycomb REST API
-Run the criteria from `EVALUATION.md` by calling the Honeycomb Query API directly. No agent needed for this step.
 
 ```python
-import httpx
+import httpx, time
 
-def run_query(dataset, query_spec, time_range="2h"):
-    resp = httpx.post(
-        f"https://api.honeycomb.io/1/queries/{dataset}",
-        headers={"X-Honeycomb-Team": api_key},
-        json={"query": {**query_spec, "time_range": time_range}},
-    )
-    # then GET /1/query_results/{id} to retrieve results
-    ...
+def run_honeycomb_query(dataset: str, query_spec: dict, api_key: str,
+                         env: str = "test", time_range: str = "15m") -> list[dict]:
+    base = "https://api.honeycomb.io/1"
+    headers = {"X-Honeycomb-Team": api_key}
+
+    # Create query
+    r = httpx.post(f"{base}/queries/{dataset}", headers=headers,
+                   json={"query": {**query_spec, "time_range": time_range},
+                         "limit": 100})
+    r.raise_for_status()
+    query_id = r.json()["id"]
+
+    # Poll for results
+    for _ in range(20):
+        r = httpx.get(f"{base}/query_results/{query_id}",
+                      headers={**headers, "X-Honeycomb-Environment": env})
+        r.raise_for_status()
+        data = r.json()
+        if data.get("complete"):
+            return data.get("data", {}).get("results", [])
+        time.sleep(1)
+
+    raise TimeoutError("Honeycomb query timed out")
 ```
 
-Criteria to implement as functions:
-- `check_spans_arriving(dataset)` → COUNT > 0
-- `check_http_routes(dataset)` → server spans with http.route breakdown (not `/*` only)
-- `check_db_spans(dataset)` → db.system exists
-- `check_skill_version(dataset)` → service.instrumentation_skill.branch exists
-- `check_no_explosion(dataset)` → top span name < some threshold
-- `check_cart_product_id(dataset)` — Broadleaf-specific
-- `check_checkout_context(dataset)` — Broadleaf-specific
+App-specific dataset names come from `apps/<app>/config.sh` (e.g. `OTEL_SERVICE_NAME`).
 
-### Step 5 — Agent efficiency metrics
+Common criteria (from root `EVALUATION.md`):
+- `check_spans_arriving` — COUNT > 0
+- `check_http_routes` — server spans with `http.route` exists, not just `/*`
+- `check_db_spans` — `db.system` exists
+- `check_skill_version` — `service.instrumentation_skill.branch` exists
+- `check_rootless_traces` — COUNT with `none.trace.parent_id does-not-exist` + `any.trace.parent_id exists` == 0
+- `check_no_explosion` — top span name count < threshold
 
-The SDK response object carries instrumentation efficiency data directly — no parsing
-needed. Capture these immediately after `query()` completes:
+App-specific criteria loaded from `apps/<app>/EVALUATION.md` (parsed or hardcoded per app).
+
+### Step 5 — Failure handling
 
 ```python
-# After the async for loop over query() events:
-metrics = {
-    "duration_ms": total_duration_ms,   # wall time from first to last event
-    "tool_uses": num_turns,             # total tool calls made by the agent
-    "input_tokens": usage.input_tokens,
-    "output_tokens": usage.output_tokens,
-    "total_tokens": usage.input_tokens + usage.output_tokens,
-}
+async def run(app: str):
+    harness(app, "reset", "--purge")
+    harness(app, "build")
+    harness(app, "bootstrap")      # no-op if not needed
+    harness(app, "instrument")
+
+    agent_metrics = await run_instrumentation(app, api_key)
+
+    try:
+        harness(app, "start", check=False)  # raises StartupFailure on exit 1
+    except StartupFailure as e:
+        record_run(app, agent_metrics, failed=True, failure_reason=str(e))
+        return
+
+    harness(app, "traffic")
+    time.sleep(15)
+
+    criteria = evaluate(app, api_key)
+    record_run(app, agent_metrics, criteria=criteria)
+
+    harness(app, "stop")
 ```
 
-These are the primary efficiency signals: token cost tells you how expensive a run
-was, tool_uses tells you how much the agent had to explore, duration tells you how
-long to wait.
-
-### Step 6 — Report output
-
-Append one record to `runs.jsonl` combining efficiency metrics, quality criteria,
-and run metadata:
+### Step 6 — runs.jsonl record
 
 ```json
 {
   "timestamp": "2026-06-10T09:00:00Z",
   "app": "beaverhabits",
   "skill_branch": "python-misc",
-  "skill_sha": "2927163",
+  "skill_sha": "56b06c1",
+  "skill_commit": "Warn that server_request_hook silently fails for NiceGUI http.route",
+  "failed": false,
+  "failure_reason": null,
   "agent": {
-    "duration_ms": 112202,
-    "tool_uses": 21,
-    "input_tokens": 45000,
-    "output_tokens": 8526,
-    "total_tokens": 53526
+    "duration_ms": 143496,
+    "tool_uses": 30,
+    "input_tokens": 58000,
+    "output_tokens": 11340,
+    "total_tokens": 69340
   },
   "criteria": {
-    "spans_arriving": { "pass": true, "value": 34 },
-    "http_routes": { "pass": false },
-    "db_spans": { "pass": true, "value": "sqlite" },
-    "skill_version": { "pass": true },
-    "rootless_traces": { "pass": true, "value": 0 },
-    "no_explosion": { "pass": true, "top_count": 19 }
+    "spans_arriving":   { "pass": true,  "value": 33 },
+    "http_routes":      { "pass": false },
+    "db_spans":         { "pass": true,  "value": "sqlite" },
+    "skill_version":    { "pass": true },
+    "rootless_traces":  { "pass": true,  "value": 0 },
+    "no_explosion":     { "pass": true,  "top_count": 19 }
   }
 }
 ```
 
-`runs.jsonl` accumulates across runs (gitignored) so you can compare efficiency and
-quality across skill branches over time: fewer tool calls and lower tokens for the
-same quality score = a more effective skill.
+Failed runs include `"failed": true, "failure_reason": "..."` and no `criteria` key.
 
 ---
 
 ## File Structure
 
 ```
-run.py                    # Main entry point
+run.py                        # Entry point: python run.py <app>
 lib/
-  harness.py              # Subprocess wrappers for harness.sh commands
-  instrumentation.py      # SDK agent invocation + efficiency metric capture
-  evaluation.py           # Honeycomb API query helpers + criterion checks
-  metrics.py              # runs.jsonl append, stdout summary formatting
-runs.jsonl                # Append-only run history: efficiency + quality (gitignored)
-requirements.txt          # claude-code-sdk, httpx, python-dotenv
+  harness.py                  # subprocess wrappers, HarnessError, StartupFailure
+  instrumentation.py          # SDK agent invocation + event handling + metric capture
+  evaluation.py               # Honeycomb REST API helpers + criterion check functions
+  metrics.py                  # runs.jsonl append + stdout summary
+runs.jsonl                    # Append-only run history (gitignored)
+requirements.txt              # or pyproject.toml: claude-code-sdk, httpx, python-dotenv
 ```
 
 ---
 
-## What the Bash Scripts DON'T Need to Change
+## What the Bash Scripts Don't Change
 
-The existing `harness.sh` / `broadleaf.sh` commands stay identical. The SDK program calls them as subprocesses. The `instrument` command still generates `.instrument-prompt.md` — the SDK program just reads that file rather than a human doing so.
+`harness.sh` stays identical. The SDK calls it as subprocesses. The `instrument` command
+still generates `.instrument-prompt.md` and writes `.skill-version` — the SDK reads
+those files rather than generating them itself.
+
+The pre-start checks in `apps/<app>/config.sh` (e.g. async SQLAlchemy detection) run as
+part of `harness.sh <app> start` — their exit codes propagate to `StartupFailure`.
 
 ---
 
 ## Verification
 
-1. `python run.py broadleaf` completes a full cycle without human input
-2. The instrumentation agent's spans appear in a separate `broadleaf-instrumentation-agent` dataset in Honeycomb
-3. The evaluation results JSON matches what manual Honeycomb queries show
-4. Running twice in a row (with `--purge`) produces independent, repeatable results
+1. `python run.py beaverhabits` completes without human input
+2. `python run.py beaverhabits` with a broken agent (missing `.sync_engine`) records a
+   FAILED run in `runs.jsonl` and stops — no patching
+3. Instrumentation agent spans appear in `beaverhabits-instrumentation` dataset in Honeycomb
+4. Two consecutive runs produce independent records in `runs.jsonl`
+5. `python run.py broadleaf` works with the same script (bootstrap handled by harness)
 
 ---
 
 ## Out of Scope (future milestones)
 
-- Loop mode: run N iterations and aggregate scores across runs
-- Multi-app: parameterise `run.py` to support Python/Node apps too
+- Loop mode: `python run.py beaverhabits --runs 5` to aggregate scores across iterations
 - CI integration: run on a schedule and post results to Slack/Linear
+- Skill branch sweep: run same app against multiple skill commits and diff results
