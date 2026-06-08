@@ -28,7 +28,7 @@ Each session simulates a fresh instrumentation engagement on a target applicatio
 2. `./broadleaf.sh build` — build all modules
 3. `./broadleaf.sh bootstrap` — seed the HSQLDB schema (required on first run and after `/tmp` is cleared, e.g. after a system restart; skipped automatically if already seeded)
 4. `./broadleaf.sh instrument` — generate `.instrument-prompt.md`, then spawn a clean-context `Agent` with that prompt (see **Applying OTel Instrumentation** below)
-5. Write `apps/broadleaf/DemoSite/.skill-version` and `apps/broadleaf/DemoSite/INSTRUMENTATION.md` (see below)
+5. Write `checkouts/broadleaf/.skill-version` and `checkouts/broadleaf/INSTRUMENTATION.md` (see below)
 6. `./broadleaf.sh start` — start site and admin
 7. `./broadleaf.sh traffic` — generate representative traffic across key paths
 8. Evaluate against `EVALUATION.md` (common criteria) and `apps/broadleaf/EVALUATION.md` (Broadleaf-specific) using Honeycomb queries
@@ -52,7 +52,7 @@ The agent starts with no conversation history and no accumulated session knowled
 
 - **DemoSite** is a Maven multi-module Spring Boot app (Spring Boot 2.7.x, Java 17+)
 - Modules: `core`, `site` (port 8080), `admin` (port 8081), `api` (port 8082)
-- App code lives at: `apps/broadleaf/DemoSite/`
+- App code lives at: `checkouts/broadleaf/`
 - Default database: embedded HSQLDB — no external services needed
 - The `clean` branch in the fork (`evanderkoogh/broadleaf-demosite`) is the unmodified upstream baseline; never commit instrumentation changes there
 - Scratch branches (`scratch_YYYY-MM-DD[-N]`) are the working branches for each test run
@@ -79,7 +79,7 @@ Use the **Playwright MCP** tools (`playwright_navigate`, `playwright_screenshot`
 
 ## Constraints
 
-**All OpenTelemetry instrumentation changes must be made inside `apps/broadleaf/DemoSite/` only.** The root-level directory and `apps/broadleaf/` config files are the test harness and must never be modified as part of an instrumentation task. If an instrumentation skill tries to create or edit files outside `apps/broadleaf/DemoSite/`, that is a mistake.
+**All OpenTelemetry instrumentation changes must be made inside `checkouts/broadleaf/` only.** The root-level directory and `apps/broadleaf/` config files are the test harness and must never be modified as part of an instrumentation task. If an instrumentation skill tries to create or edit files outside `checkouts/broadleaf/`, that is a mistake.
 
 ## Adding a new app
 

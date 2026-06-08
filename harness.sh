@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APPS_DIR="$SCRIPT_DIR/apps"
+CHECKOUTS_DIR="$SCRIPT_DIR/checkouts"
 LOG_DIR="$SCRIPT_DIR/logs"
 PID_FILE="$SCRIPT_DIR/.harness.pids"
 
@@ -35,7 +36,7 @@ COMMAND="$2"
 shift 2
 
 APP_DIR="$APPS_DIR/$APP"
-REPO_DIR="$APP_DIR/DemoSite"
+REPO_DIR="$CHECKOUTS_DIR/$APP"
 
 # Load .env if present
 if [[ -f "$SCRIPT_DIR/.env" ]]; then

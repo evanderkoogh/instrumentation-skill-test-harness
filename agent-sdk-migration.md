@@ -62,6 +62,23 @@ run.ts <app> [--skill-branch BRANCH]
 
 ## Implementation Steps
 
+### Step 0 — Restructure checkout directories
+
+Move cloned app repos from `apps/<app>/DemoSite/` to `checkouts/<app>/` so the
+gitignore is a single `checkouts/` entry rather than `apps/*/DemoSite/`, and the
+separation between app config and app code is clear.
+
+```bash
+mkdir checkouts
+mv apps/beaverhabits/DemoSite checkouts/beaverhabits
+mv apps/broadleaf/DemoSite    checkouts/broadleaf
+```
+
+Update `harness.sh`: change `REPO_DIR="$APP_DIR/DemoSite"` → `REPO_DIR="$CHECKOUTS_DIR/$APP"`.
+Add `CHECKOUTS_DIR="$SCRIPT_DIR/checkouts"` alongside `APPS_DIR`.
+Update `.gitignore`: `apps/*/DemoSite/` → `checkouts/`.
+Add `APP_DATASET="<dataset-name>"` to each `apps/<app>/config.sh` (used by evaluation).
+
 ### Step 1 — Project setup
 
 ```bash

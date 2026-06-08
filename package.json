@@ -1,0 +1,17 @@
+{
+  "name": "instrumentation-skill-test-harness",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "run": "tsx run.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "latest",
+    "dotenv": "^16.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}

@@ -1,5 +1,7 @@
-apps/*/DemoSite/
+checkouts/
 runs.jsonl
+node_modules/
+dist/
 logs/
 otel/
 .harness.pids

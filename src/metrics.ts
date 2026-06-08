@@ -1,0 +1,49 @@
+import { appendFileSync } from "fs";
+import { resolve, dirname } from "path";
+import { fileURLToPath } from "url";
+import type { AgentMetrics } from "./instrumentation.js";
+import type { EvaluationResults } from "./evaluation.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const RUNS_FILE = resolve(__dirname, "..", "runs.jsonl");
+
+export interface RunRecord {
+  timestamp: string;
+  app: string;
+  skill_branch: string;
+  skill_sha: string;
+  skill_commit: string;
+  failed: boolean;
+  failure_reason: string | null;
+  agent: AgentMetrics;
+  criteria?: EvaluationResults;
+}
+
+export function recordRun(record: RunRecord): void {
+  appendFileSync(RUNS_FILE, JSON.stringify(record) + "\n");
+}
+
+export function printSummary(record: RunRecord): void {
+  const { app, skill_branch, skill_sha, failed, failure_reason, agent, criteria } =
+    record;
+
+  console.log("\n" + "─".repeat(60));
+  console.log(`Run: ${app}  skill: ${skill_branch} @ ${skill_sha}`);
+  console.log(
+    `Agent: ${agent.tool_uses} tool calls · ${agent.total_tokens} tokens · ${(agent.duration_ms / 1000).toFixed(1)}s`
+  );
+
+  if (failed) {
+    console.log(`Result: ❌ FAILED — ${failure_reason?.split("\n")[0]}`);
+  } else if (criteria) {
+    const results = Object.entries(criteria);
+    const passed = results.filter(([, v]) => v.pass).length;
+    console.log(`Result: ${passed}/${results.length} criteria passed`);
+    for (const [key, val] of results) {
+      const icon = val.pass ? "✅" : "❌";
+      const detail = val.value !== undefined ? ` (${JSON.stringify(val.value)})` : "";
+      console.log(`  ${icon} ${key}${detail}`);
+    }
+  }
+  console.log("─".repeat(60));
+}

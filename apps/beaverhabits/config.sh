@@ -6,6 +6,7 @@ APP_REPO="https://github.com/evanderkoogh/beaverhabits.git"
 APP_CLEAN_BRANCH="clean"
 APP_HTTP_PORT=9001
 APP_OTEL_AGENT_TYPE="python"
+APP_DATASET="beaverhabits"
 
 cmd_build() {
   if [[ ! -d "$REPO_DIR" ]]; then
