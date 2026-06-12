@@ -11,11 +11,14 @@ export interface AgentMetrics {
   input_tokens: number;
   output_tokens: number;
   total_tokens: number;
+  model: string;
+  session_id: string;
 }
 
 export async function runInstrumentation(
   app: string,
-  apiKey: string
+  apiKey: string,
+  model?: string
 ): Promise<AgentMetrics> {
   const promptPath = resolve(__dirname, "..", ".instrument-prompt.md");
   const prompt = readFileSync(promptPath, "utf8");
@@ -25,6 +28,8 @@ export async function runInstrumentation(
   let toolUses = 0;
   let inputTokens = 0;
   let outputTokens = 0;
+  let resolvedModel = model ?? "unknown";
+  let sessionId = "unknown";
 
   try {
     for await (const event of query({
@@ -33,6 +38,7 @@ export async function runInstrumentation(
         allowedTools: ["Read", "Write", "Edit", "Bash"],
         cwd: repoDir,
         maxTurns: 100,
+        ...(model ? { model } : {}),
         env: {
           ...process.env,           // inherit auth tokens and PATH
           CLAUDE_CODE_ENABLE_TELEMETRY: "1",
@@ -44,7 +50,10 @@ export async function runInstrumentation(
         },
       },
     })) {
-      if (event.type === "assistant") {
+      if (event.type === "system" && event.subtype === "init") {
+        resolvedModel = event.model;
+        sessionId = event.session_id;
+      } else if (event.type === "assistant") {
         const content = event.message.content;
         if (Array.isArray(content)) {
           for (const block of content) {
@@ -81,5 +90,7 @@ export async function runInstrumentation(
     input_tokens: inputTokens,
     output_tokens: outputTokens,
     total_tokens: inputTokens + outputTokens,
+    model: resolvedModel,
+    session_id: sessionId,
   };
 }

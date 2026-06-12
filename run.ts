@@ -19,9 +19,14 @@ config({ path: resolve(__dirname, ".env") });
 
 const app = process.argv[2];
 if (!app) {
-  console.error("Usage: npx tsx run.ts <app>");
+  console.error("Usage: npx tsx run.ts <app> [--model <model-id>]");
   process.exit(1);
 }
+
+const modelArg = (() => {
+  const idx = process.argv.indexOf("--model");
+  return idx !== -1 ? process.argv[idx + 1] : undefined;
+})();
 
 // Ingest key — forwarded to the instrumentation agent for OTLP export
 const ingestKey = (() => {
@@ -47,7 +52,7 @@ async function main(): Promise<void> {
   const { dataset } = readAppConfig(app);
   const timestamp = new Date().toISOString();
 
-  console.log(`\n▶ Run: ${app}  dataset: ${dataset}`);
+  console.log(`\n▶ Run: ${app}  dataset: ${dataset}${modelArg ? `  model: ${modelArg}` : ""}`);
 
   // --- Setup ---
   console.log("→ reset --purge");
@@ -67,7 +72,7 @@ async function main(): Promise<void> {
 
   // --- Instrumentation agent ---
   console.log("→ running instrumentation agent");
-  const agentMetrics = await runInstrumentation(app, ingestKey);
+  const agentMetrics = await runInstrumentation(app, ingestKey, modelArg);
   console.log(
     `  done: ${agentMetrics.tool_uses} tool calls · ${agentMetrics.total_tokens} tokens · ${(agentMetrics.duration_ms / 1000).toFixed(1)}s`
   );
@@ -82,6 +87,7 @@ async function main(): Promise<void> {
   const baseRecord = {
     timestamp,
     app,
+    model: agentMetrics.model,
     skill_branch: skill.branch,
     skill_sha: skill.sha,
     skill_commit: skill.commit,

@@ -13,7 +13,9 @@ Broadleaf Commerce DemoSite (Spring Boot 2.7.x, Java 25) has several non-obvious
 
 **How to apply:** Always update `start-site.sh` and `start-admin.sh` in DemoSite/. The `broadleaf.sh` harness calls these scripts.
 
-**HSQLDB bootstrap:** The embedded HSQLDB stores files at `/tmp/broadleaf-hsqldb`. These persist across normal restarts but are wiped on system reboot. On a fresh environment, run `./broadleaf.sh bootstrap` (uses `mvn spring-boot:run` once to seed the schema) before the first `./broadleaf.sh start`. If `start` fails with a schema error, run `bootstrap` again.
+**HSQLDB bootstrap:** The embedded HSQLDB stores files at `/tmp/broadleaf-hsqldb`. These persist across normal restarts but are wiped on system reboot. `npx tsx run.ts broadleaf` runs bootstrap automatically; it's a no-op if already seeded. If `start` fails with a schema error, run `./broadleaf.sh bootstrap` manually.
+
+**Stale Solr:** Solr runs as a child process on port 8983 and stores its index under `/var/folders/.../T/solr-8.11.3/`. If a previous run crashed without a clean shutdown, the next bootstrap will fail with `SolrCore 'catalog_reindex' is not available due to init failure`. Fix: `kill $(lsof -ti :8983)` then `rm -rf /var/folders/sc/*/T/solr-8.11.3/`.
 
 **Start sequence:** Site must fully start (Solr up) before admin. The harness waits for `Started SiteApplication` (not just `Started `) to avoid racing on the "Started Solr server" line. Admin is then started and waits for `Started AdminApplication`.
 

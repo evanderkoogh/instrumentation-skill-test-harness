@@ -5,15 +5,22 @@ This project exists to repeatedly test Claude's OpenTelemetry instrumentation sk
 ## Structure
 
 ```
+run.ts                # Full-run orchestrator: reset → build → instrument → start → traffic → evaluate
+src/
+  instrumentation.ts  # Agent SDK runner — calls the instrumentation agent via @anthropic-ai/claude-agent-sdk
+  evaluation.ts       # Honeycomb query-based evaluation criteria
+  harness.ts          # Helpers that wrap harness.sh commands
+  metrics.ts          # Run record persistence (runs.jsonl) and summary printing
+harness.sh            # Low-level step runner: reset, build, bootstrap, start, stop, traffic, instrument
+broadleaf.sh          # Thin wrapper: ./broadleaf.sh <cmd> → ./harness.sh broadleaf <cmd>
 apps/
   broadleaf/          # Broadleaf Commerce DemoSite (Java/Spring Boot)
     config.sh         # App-specific variables and start/stop/build hooks
     traffic.sh        # Traffic generation script
     instrument-preamble.md  # App-specific intro injected into the agent prompt
     EVALUATION.md     # Evaluation checklist for this app
-    DemoSite/         # Cloned app code (gitignored)
-harness.sh            # Main orchestration: ./harness.sh <app> <command>
-broadleaf.sh          # Thin wrapper: ./broadleaf.sh <cmd> → ./harness.sh broadleaf <cmd>
+checkouts/
+  broadleaf/          # Cloned app code (gitignored)
 ```
 
 To add a new app, create `apps/<name>/` with `config.sh`, `traffic.sh`, `instrument-preamble.md`, and `EVALUATION.md`. No changes to shared harness code required.
@@ -24,29 +31,29 @@ Each session simulates a fresh instrumentation engagement on a target applicatio
 
 ## Workflow
 
-1. `./broadleaf.sh reset --purge` — discard the current scratch branch (local + remote) and create a fresh `scratch_YYYY-MM-DD` branch from the `clean` baseline
-2. `./broadleaf.sh build` — build all modules
-3. `./broadleaf.sh bootstrap` — seed the HSQLDB schema (required on first run and after `/tmp` is cleared, e.g. after a system restart; skipped automatically if already seeded)
-4. `./broadleaf.sh instrument` — generate `.instrument-prompt.md`, then spawn a clean-context `Agent` with that prompt (see **Applying OTel Instrumentation** below)
-5. Write `checkouts/broadleaf/.skill-version` and `checkouts/broadleaf/INSTRUMENTATION.md` (see below)
-6. `./broadleaf.sh start` — start site and admin
-7. `./broadleaf.sh traffic` — generate representative traffic across key paths
-8. Evaluate against `EVALUATION.md` (common criteria) and `apps/broadleaf/EVALUATION.md` (Broadleaf-specific) using Honeycomb queries
-9. Repeat from step 1
+Run a full test with:
 
-> **Note on bootstrap:** The embedded HSQLDB stores its files under `/tmp/broadleaf-hsqldb`. These survive normal session restarts but are cleared on system reboot. `bootstrap` seeds the schema via `mvn spring-boot:run` once so subsequent `start` commands can use the faster `java -cp` (exploded JAR) path. If `start` fails with a schema-related error, run `bootstrap` again.
+```
+npx tsx run.ts broadleaf
+```
 
-## Applying OTel Instrumentation (Clean-Context Agent)
+This orchestrates the complete cycle automatically:
 
-**Never use the `Skill` tool inline for instrumentation.** It runs with full conversation context, which defeats the purpose of testing the skill in isolation.
+1. `reset --purge` — discard the current scratch branch and create a fresh `scratch_YYYY-MM-DD` branch from `clean`
+2. `build` — build all modules
+3. `bootstrap` — seed the HSQLDB schema (skipped automatically if already seeded)
+4. `instrument` — generate `.instrument-prompt.md` from the skill content + app preamble
+5. Agent SDK run — `src/instrumentation.ts` drives a clean-context agent via `@anthropic-ai/claude-agent-sdk` with the prompt, no conversation history
+6. `start` — start site (port 8080) and admin (port 8081)
+7. `traffic` — generate representative traffic across key paths
+8. Evaluate — `src/evaluation.ts` queries Honeycomb and checks pass/fail criteria
+9. Record — results appended to `runs.jsonl`
 
-Instead:
+> **Note on bootstrap:** The embedded HSQLDB stores its files under `/tmp/broadleaf-hsqldb`. These survive normal session restarts but are cleared on system reboot. If `start` fails with a schema-related error, run `./broadleaf.sh bootstrap` manually before re-running.
 
-1. Run `./broadleaf.sh instrument` — this generates `.instrument-prompt.md` with the full skill content (resolving `${CLAUDE_PLUGIN_ROOT}`) and the API key from `.env`
-2. Read `.instrument-prompt.md`
-3. Spawn an `Agent` using that content as the prompt
+## harness.sh — Individual Steps
 
-The agent starts with no conversation history and no accumulated session knowledge — only what the skill says and its base training.
+`harness.sh` (and the `broadleaf.sh` wrapper) expose each step individually for debugging. `run.ts` calls these internally; you rarely need to invoke them directly. Two env vars are required: `OTEL_EXPORTER_OTLP_HEADERS` (ingest key) and `HONEYCOMB_QUERY_API_KEY` (query key with Query Data permission) — both read from `.env`.
 
 ## Key facts (Broadleaf)
 
@@ -57,15 +64,15 @@ The agent starts with no conversation history and no accumulated session knowled
 - The `clean` branch in the fork (`evanderkoogh/broadleaf-demosite`) is the unmodified upstream baseline; never commit instrumentation changes there
 - Scratch branches (`scratch_YYYY-MM-DD[-N]`) are the working branches for each test run
 
-## Running the DemoSite
+## Running the DemoSite (manual steps)
 
-Always use `broadleaf.sh` (or `harness.sh broadleaf`) to manage the DemoSite — never invoke Maven or Java directly:
+Use `broadleaf.sh` (or `harness.sh broadleaf`) to run individual steps — never invoke Maven or Java directly:
 
 - `./broadleaf.sh download` — clone the DemoSite repo (skips if already present)
 - `./broadleaf.sh download-agent` — download the OTel Java agent jar to `otel/`
 - `./broadleaf.sh build` — build all modules (skips tests)
 - `./broadleaf.sh bootstrap` — seed HSQLDB schema (once after build or system reboot)
-- `./broadleaf.sh instrument` — generate `.instrument-prompt.md` for clean-context agent
+- `./broadleaf.sh instrument` — generate `.instrument-prompt.md` (used internally by `run.ts`)
 - `./broadleaf.sh start` — start site (port 8080) and admin (port 8081) in the background
 - `./broadleaf.sh stop` — stop running servers
 - `./broadleaf.sh restart` — stop, clean logs, then start
