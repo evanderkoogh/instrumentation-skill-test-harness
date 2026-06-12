@@ -2,7 +2,6 @@ import { query } from "@anthropic-ai/claude-agent-sdk";
 import { readFileSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
-
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export interface AgentMetrics {
@@ -51,13 +50,21 @@ export async function runInstrumentation(
           CLAUDE_CODE_ENABLE_TELEMETRY: "1",
           CLAUDE_CODE_ENHANCED_TELEMETRY_BETA: "1",
           OTEL_TRACES_EXPORTER: "otlp",
+          OTEL_METRICS_EXPORTER: "otlp",
+          OTEL_LOGS_EXPORTER: "otlp",
+          OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf",
           OTEL_EXPORTER_OTLP_ENDPOINT: "https://api.honeycomb.io",
           OTEL_EXPORTER_OTLP_HEADERS: `x-honeycomb-team=${apiKey}`,
+          OTEL_LOG_TOOL_DETAILS: "1",
+          // Shorten export intervals so spans flush before the process exits
+          OTEL_TRACES_EXPORT_INTERVAL: "1000",
+          OTEL_LOGS_EXPORT_INTERVAL: "1000",
+          OTEL_METRIC_EXPORT_INTERVAL: "5000",
           OTEL_SERVICE_NAME: `${app}-instrumentation`,
           OTEL_RESOURCE_ATTRIBUTES: [
             `app=${app}`,
-            skill ? `skill.branch=${skill.branch}` : "",
-            skill ? `skill.sha=${skill.sha}` : "",
+            skill ? `skill.branch=${encodeURIComponent(skill.branch)}` : "",
+            skill ? `skill.sha=${encodeURIComponent(skill.sha)}` : "",
           ].filter(Boolean).join(","),
         },
       },
