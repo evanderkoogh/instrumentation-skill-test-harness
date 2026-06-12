@@ -15,10 +15,17 @@ export interface AgentMetrics {
   session_id: string;
 }
 
+export interface SkillVersion {
+  branch: string;
+  sha: string;
+  commit: string;
+}
+
 export async function runInstrumentation(
   app: string,
   apiKey: string,
-  model?: string
+  model?: string,
+  skill?: SkillVersion
 ): Promise<AgentMetrics> {
   const promptPath = resolve(__dirname, "..", ".instrument-prompt.md");
   const prompt = readFileSync(promptPath, "utf8");
@@ -47,6 +54,11 @@ export async function runInstrumentation(
           OTEL_EXPORTER_OTLP_ENDPOINT: "https://api.honeycomb.io",
           OTEL_EXPORTER_OTLP_HEADERS: `x-honeycomb-team=${apiKey}`,
           OTEL_SERVICE_NAME: `${app}-instrumentation`,
+          OTEL_RESOURCE_ATTRIBUTES: [
+            `app=${app}`,
+            skill ? `skill.branch=${skill.branch}` : "",
+            skill ? `skill.sha=${skill.sha}` : "",
+          ].filter(Boolean).join(","),
         },
       },
     })) {

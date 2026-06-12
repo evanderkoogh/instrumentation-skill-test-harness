@@ -91,7 +91,7 @@ async function main(): Promise<void> {
       console.log("→ running instrumentation agent");
       const agentMetrics = await tracer.startActiveSpan("instrumentation-agent", async (span) => {
         try {
-          const metrics = await runInstrumentation(app, ingestKey, modelArg);
+          const metrics = await runInstrumentation(app, ingestKey, modelArg, skill);
           span.setAttributes({
             "agent.model": metrics.model,
             "agent.session_id": metrics.session_id,
