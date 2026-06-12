@@ -27,7 +27,8 @@ export function harness(app: string, ...args: string[]): string {
     stdio: ["inherit", "pipe", "pipe"],
   });
   if (result.status !== 0) {
-    throw new HarnessError(`${app} ${args.join(" ")}`, result.stderr ?? "");
+    const detail = (result.stderr || result.stdout || "").trim();
+    throw new HarnessError(`${app} ${args.join(" ")}`, detail);
   }
   return result.stdout ?? "";
 }
