@@ -3,7 +3,7 @@
 
 APP_NAME="broadleaf"
 APP_REPO="https://github.com/evanderkoogh/broadleaf-demosite.git"
-APP_CLEAN_BRANCH="clean"
+APP_CLEAN_SHA="37c9e92e0eb3744fead4024f56b16509553998e2"
 APP_HTTP_PORT=8080
 APP_OTEL_AGENT_TYPE="java"
 APP_DATASET="broadleaf-site"

@@ -78,9 +78,16 @@ harness_download() {
     echo "Repo already cloned at $REPO_DIR — skipping."
     return
   fi
-  local branch="${APP_CLEAN_BRANCH:-main}"
-  echo "Cloning $APP_REPO (branch: $branch)..."
-  git clone --branch "$branch" "$APP_REPO" "$REPO_DIR"
+  if [[ -n "${APP_CLEAN_SHA:-}" ]]; then
+    echo "Cloning $APP_REPO..."
+    git clone "$APP_REPO" "$REPO_DIR"
+    echo "Checking out $APP_CLEAN_SHA..."
+    git -C "$REPO_DIR" checkout "$APP_CLEAN_SHA"
+  else
+    local branch="${APP_CLEAN_BRANCH:-main}"
+    echo "Cloning $APP_REPO (branch: $branch)..."
+    git clone --branch "$branch" "$APP_REPO" "$REPO_DIR"
+  fi
   local scratch_branch
   scratch_branch="$(make_scratch_branch)"
   echo "Switching to $scratch_branch..."
@@ -186,33 +193,64 @@ harness_reset() {
     echo "Repo not found. Run '$0 $APP download' first." >&2
     exit 1
   fi
-  local clean_branch="${APP_CLEAN_BRANCH:-main}"
   local current_branch
   current_branch="$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD)"
-  if $purge; then
-    if [[ "$current_branch" == "$clean_branch" ]]; then
-      echo "Cannot purge the '$clean_branch' branch." >&2
-      exit 1
-    fi
-    echo "Switching to $clean_branch before purge..."
-    git -C "$REPO_DIR" checkout "$clean_branch"
-    git -C "$REPO_DIR" restore .
-    git -C "$REPO_DIR" clean -fd
-    find "$REPO_DIR" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-    echo "Deleting local branch '$current_branch'..."
-    git -C "$REPO_DIR" branch -D "$current_branch"
-    if git -C "$REPO_DIR" ls-remote --exit-code origin "$current_branch" &>/dev/null; then
-      echo "Deleting remote branch '$current_branch'..."
-      git -C "$REPO_DIR" push origin --delete "$current_branch"
+
+  if [[ -n "${APP_CLEAN_SHA:-}" ]]; then
+    # SHA mode: detach to the pinned commit, no branch tracking required
+    if $purge; then
+      if [[ "$current_branch" != scratch_* ]]; then
+        echo "Cannot purge: not on a scratch branch (current: $current_branch)." >&2
+        exit 1
+      fi
+      echo "Switching to $APP_CLEAN_SHA before purge..."
+      git -C "$REPO_DIR" checkout "$APP_CLEAN_SHA"
+      git -C "$REPO_DIR" restore .
+      git -C "$REPO_DIR" clean -fd
+      find "$REPO_DIR" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+      echo "Deleting local branch '$current_branch'..."
+      git -C "$REPO_DIR" branch -D "$current_branch"
+      if git -C "$REPO_DIR" ls-remote --exit-code origin "$current_branch" &>/dev/null; then
+        echo "Deleting remote branch '$current_branch'..."
+        git -C "$REPO_DIR" push origin --delete "$current_branch"
+      else
+        echo "No remote branch '$current_branch' to delete."
+      fi
     else
-      echo "No remote branch '$current_branch' to delete."
+      git -C "$REPO_DIR" checkout "$APP_CLEAN_SHA"
+      git -C "$REPO_DIR" restore .
+      git -C "$REPO_DIR" clean -fd
+      find "$REPO_DIR" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
     fi
   else
-    git -C "$REPO_DIR" checkout "$clean_branch"
-    git -C "$REPO_DIR" restore .
-    git -C "$REPO_DIR" clean -fd
-    find "$REPO_DIR" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+    # Branch mode (legacy: fork with a named clean branch)
+    local clean_branch="${APP_CLEAN_BRANCH:-main}"
+    if $purge; then
+      if [[ "$current_branch" == "$clean_branch" ]]; then
+        echo "Cannot purge the '$clean_branch' branch." >&2
+        exit 1
+      fi
+      echo "Switching to $clean_branch before purge..."
+      git -C "$REPO_DIR" checkout "$clean_branch"
+      git -C "$REPO_DIR" restore .
+      git -C "$REPO_DIR" clean -fd
+      find "$REPO_DIR" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+      echo "Deleting local branch '$current_branch'..."
+      git -C "$REPO_DIR" branch -D "$current_branch"
+      if git -C "$REPO_DIR" ls-remote --exit-code origin "$current_branch" &>/dev/null; then
+        echo "Deleting remote branch '$current_branch'..."
+        git -C "$REPO_DIR" push origin --delete "$current_branch"
+      else
+        echo "No remote branch '$current_branch' to delete."
+      fi
+    else
+      git -C "$REPO_DIR" checkout "$clean_branch"
+      git -C "$REPO_DIR" restore .
+      git -C "$REPO_DIR" clean -fd
+      find "$REPO_DIR" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+    fi
   fi
+
   local scratch_branch
   scratch_branch="$(make_scratch_branch)"
   echo "Creating branch '$scratch_branch'..."

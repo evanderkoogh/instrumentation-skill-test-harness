@@ -91,7 +91,7 @@ Use the **Playwright MCP** tools (`playwright_navigate`, `playwright_screenshot`
 ## Adding a new app
 
 1. `mkdir apps/<name>`
-2. Create `apps/<name>/config.sh` — set `APP_NAME`, `APP_REPO`, `APP_CLEAN_BRANCH`, `APP_OTEL_AGENT_TYPE`, and define `cmd_build()`, `cmd_start()` (and optionally `cmd_bootstrap()`, `cmd_status()`)
+2. Create `apps/<name>/config.sh` — set `APP_NAME`, `APP_REPO`, `APP_CLEAN_SHA` (a commit SHA from the upstream repo; no fork required), `APP_OTEL_AGENT_TYPE`, and define `cmd_build()`, `cmd_start()` (and optionally `cmd_bootstrap()`, `cmd_status()`)
 3. Create `apps/<name>/traffic.sh` — standalone script that generates traffic against the running app
 4. Create `apps/<name>/instrument-preamble.md` — app-specific intro injected before the skill content; use `%REPO_DIR%`, `%API_KEY%`, `%OTLP_ENDPOINT%` as substitution placeholders
 5. Create `apps/<name>/EVALUATION.md` — evaluation checklist for verifying instrumentation quality
