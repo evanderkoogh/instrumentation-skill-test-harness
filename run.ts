@@ -64,7 +64,7 @@ async function main(): Promise<void> {
 
     try {
       // --- Setup ---
-      for (const step of ["reset --purge", "build", "bootstrap", "instrument"] as const) {
+      for (const step of ["download", "reset --purge", "build", "bootstrap", "instrument"] as const) {
         const [cmd, ...args] = step.split(" ");
         console.log(`→ ${step}`);
         await tracer.startActiveSpan(step, async (span) => {
