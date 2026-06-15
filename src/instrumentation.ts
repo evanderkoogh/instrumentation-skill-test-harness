@@ -4,6 +4,17 @@ import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+function toolDetail(name: string, input: Record<string, unknown>): string {
+  const trunc = (s: unknown, n = 80) => String(s ?? "").replace(/\s+/g, " ").slice(0, n);
+  switch (name) {
+    case "Read":    return ` ${trunc(input.file_path)}`;
+    case "Write":   return ` ${trunc(input.file_path)}`;
+    case "Edit":    return ` ${trunc(input.file_path)}`;
+    case "Bash":    return `  ${trunc(input.command)}`;
+    default:        return "";
+  }
+}
+
 export interface AgentMetrics {
   duration_ms: number;
   tool_uses: number;
@@ -83,21 +94,23 @@ export async function runInstrumentation(
               (block as { type: string }).type === "tool_use"
             ) {
               toolUses++;
+              const b = block as { type: string; name: string; input: Record<string, unknown> };
+              const detail = toolDetail(b.name, b.input);
+              const elapsed = `${((Date.now() - start) / 1000).toFixed(0)}s`;
+              console.log(`  [${elapsed}] ${b.name}${detail}`);
             }
           }
         }
-        process.stdout.write(".");
       } else if (event.type === "result") {
         inputTokens = event.usage?.input_tokens ?? 0;
         outputTokens = event.usage?.output_tokens ?? 0;
-        process.stdout.write("\n");
       }
     }
   } catch (err) {
     // Socket drop after agent finishes is common on long runs — treat as completion
     // if the agent made tool calls (indicating it did work before the drop).
     if (toolUses > 0 && String(err).includes("socket connection was closed")) {
-      process.stdout.write(" [connection dropped — treating as complete]\n");
+      console.log("  [connection dropped — treating as complete]");
     } else {
       throw err;
     }
