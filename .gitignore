@@ -1,12 +1,10 @@
 checkouts/
 runs.jsonl
 node_modules/
-dist/
 logs/
 otel/
 .harness.pids
-.broadleaf.pids
 .env
-.playwright-mcp/
 otelcol-*.ndjson
 .instrument-prompt.md
+.claude/
