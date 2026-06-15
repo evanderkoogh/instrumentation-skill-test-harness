@@ -2,8 +2,8 @@
 # Sourced by harness.sh; defines APP_* variables and cmd_* overrides.
 
 APP_NAME="beaverhabits"
-APP_REPO="https://github.com/evanderkoogh/beaverhabits.git"
-APP_CLEAN_BRANCH="clean"
+APP_REPO="https://github.com/daya0576/beaverhabits.git"
+APP_CLEAN_SHA="a4e860e6a66ed8482a8b51829cfb87be69ad0baa"
 APP_HTTP_PORT=9001
 APP_OTEL_AGENT_TYPE="python"
 APP_DATASET="beaverhabits"

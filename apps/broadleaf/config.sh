@@ -2,13 +2,21 @@
 # Sourced by harness.sh; defines APP_* variables and cmd_* overrides.
 
 APP_NAME="broadleaf"
-APP_REPO="https://github.com/evanderkoogh/broadleaf-demosite.git"
-APP_CLEAN_SHA="37c9e92e0eb3744fead4024f56b16509553998e2"
+APP_REPO="https://github.com/BroadleafCommerce/DemoSite.git"
+APP_CLEAN_SHA="8b6741b84048324fb7e618bc4b643762209ce9c3"
 APP_HTTP_PORT=8080
 APP_OTEL_AGENT_TYPE="java"
 APP_DATASET="broadleaf-site"
 
 MAVEN_OPTS_VAL="-Xmx1g"
+
+cmd_setup() {
+  # Copy harness baseline files into the checkout (not in upstream repo).
+  cp "$APP_DIR/files/start-site.sh"  "$REPO_DIR/start-site.sh"
+  cp "$APP_DIR/files/start-admin.sh" "$REPO_DIR/start-admin.sh"
+  chmod +x "$REPO_DIR/start-site.sh" "$REPO_DIR/start-admin.sh"
+  echo "Baseline files installed."
+}
 
 cmd_build() {
   if [[ ! -d "$REPO_DIR" ]]; then

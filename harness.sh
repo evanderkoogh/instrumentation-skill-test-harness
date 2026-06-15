@@ -88,6 +88,10 @@ harness_download() {
     echo "Cloning $APP_REPO (branch: $branch)..."
     git clone --branch "$branch" "$APP_REPO" "$REPO_DIR"
   fi
+  if declare -f cmd_setup > /dev/null 2>&1; then
+    echo "Running app setup..."
+    cmd_setup
+  fi
   local scratch_branch
   scratch_branch="$(make_scratch_branch)"
   echo "Switching to $scratch_branch..."
@@ -251,6 +255,10 @@ harness_reset() {
     fi
   fi
 
+  if declare -f cmd_setup > /dev/null 2>&1; then
+    echo "Running app setup..."
+    cmd_setup
+  fi
   local scratch_branch
   scratch_branch="$(make_scratch_branch)"
   echo "Creating branch '$scratch_branch'..."
