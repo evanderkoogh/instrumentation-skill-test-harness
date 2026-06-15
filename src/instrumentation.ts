@@ -97,7 +97,7 @@ export async function runInstrumentation(
               const b = block as { type: string; name: string; input: Record<string, unknown> };
               const detail = toolDetail(b.name, b.input);
               const elapsed = `${((Date.now() - start) / 1000).toFixed(0)}s`;
-              console.log(`  [${elapsed}] ${b.name}${detail}`);
+              console.log(`  [${app}][${elapsed}] ${b.name}${detail}`);
             }
           }
         }
