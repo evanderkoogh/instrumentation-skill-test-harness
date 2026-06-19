@@ -19,5 +19,7 @@ fi
 
 exec java \
   -javaagent:"$SPRING_INSTRUMENT" \
+  -Dhttp.server.port="${SITE_HTTP_PORT:-8080}" \
+  -Dserver.port="${SITE_HTTPS_PORT:-8443}" \
   -cp "$EXPLODED/BOOT-INF/classes:$EXPLODED/BOOT-INF/lib/*" \
   com.community.SiteApplication

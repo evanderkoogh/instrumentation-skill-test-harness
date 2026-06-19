@@ -17,9 +17,9 @@ Minimum required fields:
 APP_NAME="myapp"
 APP_REPO="https://github.com/org/repo.git"
 APP_CLEAN_SHA="<full 40-char SHA from upstream>"
-APP_HTTP_PORT=8080
+APP_HTTP_PORT=8080           # MUST be unique across apps — parallel runs share the host (see ports note below)
 APP_OTEL_AGENT_TYPE="java"   # or "python", "node", "none"
-APP_DATASET="myapp"          # Honeycomb dataset name (matches OTEL_SERVICE_NAME the app will use)
+APP_DATASET="myapp"          # Honeycomb dataset name == the service.name the instrumentation must emit
 
 cmd_build() { ... }   # required
 cmd_start() { ... }   # required
@@ -28,6 +28,8 @@ cmd_start() { ... }   # required
 ```
 
 `cmd_start()` must wait for the server to be ready (poll a log file or health endpoint) before returning, and write the PID to `$PID_FILE`.
+
+**Parallel-safe by design:** `LOG_DIR` (`logs/<app>/`), `PID_FILE` (`.harness.<app>.pids`), and the prompt (`.instrument-prompt.<app>.md`) are all app-scoped, and the checkout is per-app — so `npx tsx run.ts <a> <b> --parallel` runs apps concurrently. The one thing the harness can't isolate is host ports: give every app a unique `APP_HTTP_PORT` (and any other listener). Current assignments: broadleaf 8080/8443 + admin 8081/8444, realworld-go 8090, beaverhabits 9001. `cmd_start` should reference these vars (not literals) and `traffic.sh` reads exported `APP_HTTP_PORT`/`APP_HTTPS_PORT`.
 
 ### 2. If baseline files are needed: `apps/<name>/files/`
 
@@ -54,7 +56,9 @@ Injected before the skill content in the agent prompt. Keep it short. Standard b
 You are applying OpenTelemetry instrumentation to <AppName> — <one-line description>.
 ```
 
-Use `%REPO_DIR%`, `%API_KEY%`, `%OTLP_ENDPOINT%` as substitution placeholders.
+Use `%REPO_DIR%`, `%API_KEY%`, `%OTLP_ENDPOINT%`, `%APP_DATASET%` as substitution placeholders.
+
+The harness intentionally does **not** set `OTEL_SERVICE_NAME` — the instrumentation skill is responsible for setting `service.name`. So the preamble must pin it for the harness to find the data: add a line telling the agent to use `%APP_DATASET%` as the service name (`service.name` / `OTEL_SERVICE_NAME`) so traces land in the matching Honeycomb dataset. The `service_name` evaluation criterion (in `src/evaluation.ts`) fails if `service.name` is absent or left at the OTel default (`unknown_service`).
 
 ### 5. Create `apps/<name>/EVALUATION.md`
 

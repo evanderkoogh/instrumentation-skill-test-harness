@@ -4,8 +4,11 @@ node_modules/
 logs/
 otel/
 .harness.pids
+.harness.*.pids
 .env
 otelcol-*.ndjson
 .instrument-prompt.md
+.instrument-prompt.*.md
+.test-runs/
 .claude/
 agent-skill

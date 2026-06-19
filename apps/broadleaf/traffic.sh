@@ -3,12 +3,13 @@
 # Called by harness.sh when running: ./broadleaf.sh traffic
 set -euo pipefail
 
-if ! lsof -ti tcp:8443 > /dev/null 2>&1; then
-  echo "Site is not running on port 8443. Run './broadleaf.sh start' first." >&2
+PORT="${APP_HTTPS_PORT:-8443}"
+if ! lsof -ti tcp:"$PORT" > /dev/null 2>&1; then
+  echo "Site is not running on port $PORT. Run './broadleaf.sh start' first." >&2
   exit 1
 fi
 
-base="https://localhost:8443"
+base="https://localhost:$PORT"
 paths=(
   "/"
   "/hot-sauces"

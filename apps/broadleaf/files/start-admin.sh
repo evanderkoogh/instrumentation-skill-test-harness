@@ -19,5 +19,7 @@ fi
 
 exec java \
   -javaagent:"$SPRING_INSTRUMENT" \
+  -Dhttp.server.port="${ADMIN_HTTP_PORT:-8081}" \
+  -Dserver.port="${ADMIN_HTTPS_PORT:-8444}" \
   -cp "$EXPLODED/BOOT-INF/classes:$EXPLODED/BOOT-INF/lib/*" \
   com.community.admin.AdminApplication

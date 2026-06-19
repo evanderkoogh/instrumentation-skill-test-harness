@@ -37,7 +37,7 @@ export async function runInstrumentation(
   model?: string,
   skill?: SkillVersion
 ): Promise<AgentMetrics> {
-  const promptPath = resolve(__dirname, "..", ".instrument-prompt.md");
+  const promptPath = resolve(__dirname, "..", `.instrument-prompt.${app}.md`);
   const prompt = readFileSync(promptPath, "utf8");
   const repoDir = resolve(__dirname, "..", "checkouts", app);
 

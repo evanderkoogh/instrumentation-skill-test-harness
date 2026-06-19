@@ -4,8 +4,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APPS_DIR="$SCRIPT_DIR/apps"
 CHECKOUTS_DIR="$SCRIPT_DIR/checkouts"
-LOG_DIR="$SCRIPT_DIR/logs"
-PID_FILE="$SCRIPT_DIR/.harness.pids"
 
 usage() {
   echo "Usage: $(basename "$0") <app> {download|download-agent|build|bootstrap|start|stop|restart|status|reset [--purge]|clean|traffic|instrument}"
@@ -37,6 +35,9 @@ shift 2
 
 APP_DIR="$APPS_DIR/$APP"
 REPO_DIR="$CHECKOUTS_DIR/$APP"
+# App-scoped so multiple apps can run concurrently without clobbering each other.
+LOG_DIR="$SCRIPT_DIR/logs/$APP"
+PID_FILE="$SCRIPT_DIR/.harness.$APP.pids"
 
 # Load .env if present
 if [[ -f "$SCRIPT_DIR/.env" ]]; then
@@ -281,6 +282,10 @@ harness_traffic() {
     echo "Create apps/$APP/traffic.sh or define cmd_traffic() in config.sh." >&2
     exit 1
   fi
+  # traffic.sh runs in a fresh bash; export the port vars so it can target the
+  # ports this app was actually started on (config.sh sets these without export).
+  export APP_HTTP_PORT="${APP_HTTP_PORT:-}"
+  export APP_HTTPS_PORT="${APP_HTTPS_PORT:-}"
   bash "$traffic_script"
 }
 
@@ -322,7 +327,7 @@ harness_instrument() {
   skill_branch=$(git -C "$skill_git_root" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
   skill_sha=$(git -C "$skill_git_root" rev-parse --short HEAD 2>/dev/null || echo "unknown")
 
-  local subst=(-e "s|%REPO_DIR%|$REPO_DIR|g" -e "s|%API_KEY%|$api_key|g" -e "s|%OTLP_ENDPOINT%|$otlp_endpoint|g")
+  local subst=(-e "s|%REPO_DIR%|$REPO_DIR|g" -e "s|%API_KEY%|$api_key|g" -e "s|%OTLP_ENDPOINT%|$otlp_endpoint|g" -e "s|%APP_DATASET%|${APP_DATASET:-}|g")
 
   local app_preamble=""
   if [[ -f "$APP_DIR/instrument-preamble.md" ]]; then
@@ -351,7 +356,7 @@ SKILL_SHA=$skill_sha
 SKILL_COMMIT_MSG="$skill_commit_msg"
 EOF
 
-  local prompt_file="$SCRIPT_DIR/.instrument-prompt.md"
+  local prompt_file="$SCRIPT_DIR/.instrument-prompt.$APP.md"
   {
     if [[ -n "$preamble" ]]; then
       printf '%s\n\n---\n' "$preamble"

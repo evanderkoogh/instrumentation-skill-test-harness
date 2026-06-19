@@ -58,6 +58,9 @@ cmd_start() {
     exit 1
   fi
 
+  # NOTE: service.name is intentionally NOT set here. The instrumentation skill must
+  # hardcode service.name in the application's OTel Resource so spans land in the
+  # "$APP_DATASET" dataset. The evaluation verifies this (service_name criterion).
   local otel_resource_attrs=""
   if [[ -f "$REPO_DIR/.skill-version" ]]; then
     # shellcheck disable=SC1090
@@ -74,7 +77,6 @@ cmd_start() {
     TRUSTED_LOCAL_EMAIL=test@example.com \
     OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-https://api.honeycomb.io}" \
     OTEL_EXPORTER_OTLP_HEADERS="${OTEL_EXPORTER_OTLP_HEADERS:-}" \
-    OTEL_SERVICE_NAME="${OTEL_SERVICE_NAME:-beaverhabits}" \
     OTEL_RESOURCE_ATTRIBUTES="$otel_resource_attrs" \
     uv run uvicorn beaverhabits.main:app --workers 1 --port 9001 --host 0.0.0.0
   ) > "$LOG_DIR/beaverhabits.log" 2>&1 &

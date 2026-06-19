@@ -19,4 +19,4 @@ Broadleaf Commerce DemoSite (Spring Boot 2.7.x, Java 25) has several non-obvious
 
 **Start sequence:** Site must fully start (Solr up) before admin. The harness waits for `Started SiteApplication` (not just `Started `) to avoid racing on the "Started Solr server" line. Admin is then started and waits for `Started AdminApplication`.
 
-**Ports:** site HTTP 8080, HTTPS 8443; admin 8081; HSQLDB 9001; Solr 8983.
+**Ports:** site HTTP 8080 / HTTPS 8443; admin HTTP 8081 / HTTPS 8444; Solr 8983. HSQLDB is **embedded/file-based** (`/tmp/broadleaf-hsqldb`) and opens NO network port (9001 is HSQLDB's server-mode default, unused here). The four Spring ports are configurable via `APP_HTTP_PORT` / `APP_HTTPS_PORT` / `APP_ADMIN_HTTP_PORT` / `APP_ADMIN_HTTPS_PORT` in `config.sh`, passed to the JVM as `-Dhttp.server.port` / `-Dserver.port` by the start scripts. `-Dserver.port` (HTTPS, the traffic target) reliably overrides; `-Dhttp.server.port` is a Broadleaf-custom property and may not.

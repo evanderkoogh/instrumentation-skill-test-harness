@@ -1,7 +1,8 @@
 import { config } from "dotenv";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
-import { writeFileSync } from "fs";
+import { writeFileSync, readdirSync } from "fs";
+import { spawn } from "node:child_process";
 import {
   harness,
   harnessStart,
@@ -18,18 +19,32 @@ import { SpanStatusCode } from "@opentelemetry/api";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 config({ path: resolve(__dirname, ".env") });
-initTracing();
 
-const app = process.argv[2];
-if (!app) {
-  console.error("Usage: npx tsx run.ts <app> [--model <model-id>]");
+// --- Arg parsing ---
+// Usage: npx tsx run.ts <app...|all> [--parallel] [--model <model-id>]
+// One app  → run inline (full in-process tracing).
+// Many apps → spawn one child process per app, sequential or --parallel.
+const apps: string[] = [];
+let parallel = false;
+let modelArg: string | undefined;
+for (let i = 2; i < process.argv.length; i++) {
+  const a = process.argv[i];
+  if (a === "--parallel") parallel = true;
+  else if (a === "--model") modelArg = process.argv[++i];
+  else apps.push(a);
+}
+
+if (apps.length === 0) {
+  console.error("Usage: npx tsx run.ts <app...|all> [--parallel] [--model <model-id>]");
   process.exit(1);
 }
 
-const modelArg = (() => {
-  const idx = process.argv.indexOf("--model");
-  return idx !== -1 ? process.argv[idx + 1] : undefined;
-})();
+// "all" expands to every app profile under apps/.
+const appList = apps.includes("all")
+  ? readdirSync(resolve(__dirname, "apps"), { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name)
+  : apps;
 
 // Ingest key — forwarded to the instrumentation agent for OTLP export
 const ingestKey = (() => {
@@ -51,7 +66,7 @@ if (!queryApiKey) {
   process.exit(1);
 }
 
-async function main(): Promise<void> {
+async function runApp(app: string): Promise<void> {
   const tracer = getTracer();
   const { dataset } = readAppConfig(app);
   const timestamp = new Date().toISOString();
@@ -220,9 +235,52 @@ async function main(): Promise<void> {
   });
 }
 
-main()
-  .catch((err) => {
-    console.error(err);
-    process.exit(1);
-  })
-  .finally(() => shutdownTracing());
+// Spawn `npx tsx run.ts <app>` as a child so each app run is fully isolated
+// (own process, own OTel tracing, own dataset). Resolves to the child exit code.
+function spawnChild(app: string): Promise<number> {
+  const args = ["tsx", resolve(__dirname, "run.ts"), app];
+  if (modelArg) args.push("--model", modelArg);
+  return new Promise((res) => {
+    const child = spawn("npx", args, { stdio: "inherit", cwd: __dirname });
+    child.on("exit", (code) => res(code ?? 1));
+  });
+}
+
+async function orchestrate(): Promise<void> {
+  // Single app → run inline so the run spans export from this process.
+  if (appList.length === 1) {
+    initTracing();
+    try {
+      await runApp(appList[0]);
+    } finally {
+      await shutdownTracing();
+    }
+    return;
+  }
+
+  // Multiple apps → fan out to child processes.
+  console.log(
+    `\n▶ Running ${appList.length} apps ${parallel ? "in parallel" : "sequentially"}: ${appList.join(", ")}`
+  );
+  const exitCodes: Record<string, number> = {};
+  if (parallel) {
+    await Promise.all(
+      appList.map((a) => spawnChild(a).then((code) => { exitCodes[a] = code; }))
+    );
+  } else {
+    for (const a of appList) exitCodes[a] = await spawnChild(a);
+  }
+
+  console.log("\n" + "=".repeat(60));
+  console.log("Multi-app run complete:");
+  for (const a of appList) {
+    console.log(`  ${exitCodes[a] === 0 ? "✅" : "❌"} ${a} (exit ${exitCodes[a]})`);
+  }
+  console.log("=".repeat(60));
+  if (Object.values(exitCodes).some((c) => c !== 0)) process.exit(1);
+}
+
+orchestrate().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
