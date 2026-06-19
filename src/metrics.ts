@@ -26,35 +26,37 @@ export function recordRun(record: RunRecord): void {
   appendFileSync(RUNS_FILE, JSON.stringify(record) + "\n");
 }
 
-export function printSummary(record: RunRecord): void {
+// `log` lets callers tee the summary into a run-scoped progress file as well as stdout;
+// defaults to console.log for callers that only want the terminal.
+export function printSummary(record: RunRecord, log: (line: string) => void = console.log): void {
   const { app, skill_branch, skill_sha, failed, failure_reason, agent, criteria, weaver } =
     record;
 
-  console.log("\n" + "─".repeat(60));
-  console.log(`Run: ${app}  skill: ${skill_branch} @ ${skill_sha}`);
-  console.log(
+  log("\n" + "─".repeat(60));
+  log(`Run: ${app}  skill: ${skill_branch} @ ${skill_sha}`);
+  log(
     `Agent: ${agent.tool_uses} tool calls · ${agent.total_tokens} tokens · ${(agent.duration_ms / 1000).toFixed(1)}s`
   );
 
   if (failed) {
-    console.log(`Result: ❌ FAILED — ${failure_reason?.split("\n")[0]}`);
+    log(`Result: ❌ FAILED — ${failure_reason?.split("\n")[0]}`);
   } else if (criteria) {
     const results = Object.entries(criteria);
     const passed = results.filter(([, v]) => v.pass).length;
-    console.log(`Result: ${passed}/${results.length} criteria passed`);
+    log(`Result: ${passed}/${results.length} criteria passed`);
     for (const [key, val] of results) {
       const icon = val.pass ? "✅" : "❌";
       const detail = val.value !== undefined ? ` (${JSON.stringify(val.value)})` : "";
-      console.log(`  ${icon} ${key}${detail}`);
+      log(`  ${icon} ${key}${detail}`);
     }
     if (weaver && !weaver.skipped) {
-      console.log(
+      log(
         `  weaver: ${weaver.violations} violations · ${weaver.improvements} improvements · ` +
           `${weaver.total_entities} entities · registry: ${weaver.registry}`
       );
     } else if (weaver?.skipped) {
-      console.log(`  weaver: skipped (${weaver.reason})`);
+      log(`  weaver: skipped (${weaver.reason})`);
     }
   }
-  console.log("─".repeat(60));
+  log("─".repeat(60));
 }

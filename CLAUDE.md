@@ -50,6 +50,12 @@ concurrent runs don't collide. All generated run-scoped scratch files live under
 ports — configured per app in `apps/<app>/config.sh` (`APP_HTTP_PORT` and any
 other listener vars the app defines).
 
+**Watching live progress:** each run writes phase markers and its final result to
+`tmp/run-progress.<app>.log`, which is **truncated at the start of every run** — so
+`tail -f tmp/run-progress.<app>.log` always reflects only the current run for that app.
+Tail this rather than piping `run.ts` stdout through `tail` (buffers until exit) or
+reading any hand-made cross-run redirect log (mixes stale entries from earlier runs).
+
 During `start`, the harness also brings up a per-run OTel Collector + `weaver registry
 live-check` OTLP receiver (dynamically-allocated ports, app-scoped config/pid/state) and
 points the app's OTLP export at the collector, which fans telemetry out to **both**
@@ -98,6 +104,8 @@ Use the **Playwright MCP** tools (`playwright_navigate`, `playwright_screenshot`
 ## Constraints
 
 **All OpenTelemetry instrumentation changes must be made inside the target app's `checkouts/<app>/` only.** The root-level directory and `apps/<app>/` config files are the test harness and must never be modified as part of an instrumentation task. If an instrumentation skill tries to create or edit files outside `checkouts/<app>/`, that is a mistake.
+
+This is enforced — not just documented — by a hard sandbox on the instrumentation agent (`src/sandbox.ts`, wired in as a `PreToolUse` hook in `src/instrumentation.ts`). The agent's filesystem access within the harness tree is confined to its own `checkouts/<app>/` plus the bundled `otel/` tooling (so it can run `weaver`); any `Read`/`Write`/`Edit`/`Bash` that touches the harness's own files — `src/` (incl. `evaluation.ts`/`weaver.ts`), `EVALUATION.md`, `harness.sh`, collector/weaver config, `.env`, or other apps' checkouts — is denied. Paths outside the harness entirely (system toolchains, dependency caches, `$HOME`, `/tmp`) stay reachable so the agent can still build and verify. This prevents the agent from reading the eval criteria ("the answer key") and overfitting the score.
 
 ## Adding a new app
 
