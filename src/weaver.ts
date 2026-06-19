@@ -43,7 +43,7 @@ function sleep(ms: number): Promise<void> {
 // report and exit) and parse the resulting report. weaver ran as an OTLP receiver during
 // traffic, fed by the fan-out collector; here we just collect its verdict.
 export async function runWeaverLiveCheck(app: string): Promise<WeaverResult> {
-  const stateFile = resolve(__dirname, "..", `.harness.${app}.weaver.json`);
+  const stateFile = resolve(__dirname, "..", "tmp", `.harness.${app}.weaver.json`);
   if (!existsSync(stateFile)) {
     return { pass: false, skipped: true, reason: "weaver capture not enabled for this run" };
   }

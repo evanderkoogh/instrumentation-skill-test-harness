@@ -3,16 +3,9 @@ runs.jsonl
 node_modules/
 logs/
 otel/
-.harness.pids
-.harness.*.pids
-.harness.*.collector.pid
-.harness.*.collector.yaml
-.harness.*.weaver.pid
-.harness.*.weaver.json
+tmp/
 .env
 otelcol-*.ndjson
-.instrument-prompt.md
-.instrument-prompt.*.md
 .test-runs/
 .claude/
 agent-skill

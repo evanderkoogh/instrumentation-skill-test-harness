@@ -44,8 +44,9 @@ npx tsx run.ts all --parallel             # every app under apps/, concurrently
 With more than one app, `run.ts` spawns one isolated child process per app
 (`--parallel` runs them concurrently; otherwise sequentially) and prints a
 combined pass/fail summary. Each app uses app-scoped logs (`logs/<app>/`), PID
-file (`.harness.<app>.pids`), and prompt (`.instrument-prompt.<app>.md`), so
-concurrent runs don't collide. For `--parallel`, each app must bind distinct
+file (`tmp/.harness.<app>.pids`), and prompt (`tmp/.instrument-prompt.<app>.md`), so
+concurrent runs don't collide. All generated run-scoped scratch files live under
+`tmp/` (gitignored), not the repo root. For `--parallel`, each app must bind distinct
 ports — configured per app in `apps/<app>/config.sh` (`APP_HTTP_PORT` and any
 other listener vars the app defines).
 
@@ -62,7 +63,7 @@ This orchestrates the complete cycle automatically:
 1. `reset --purge` — discard the current scratch branch and create a fresh `scratch_YYYY-MM-DD` branch from `clean`
 2. `build` — build all modules
 3. `bootstrap` — one-time setup (e.g. seed a database) if the app defines it; skipped automatically if already done
-4. `instrument` — generate `.instrument-prompt.<app>.md` from the skill content + app preamble
+4. `instrument` — generate `tmp/.instrument-prompt.<app>.md` from the skill content + app preamble
 5. Agent SDK run — `src/instrumentation.ts` drives a clean-context agent via `@anthropic-ai/claude-agent-sdk` with the prompt, no conversation history
 6. `start` — launch the app's server(s) in the background (ports configured in `apps/<app>/config.sh`)
 7. `traffic` — generate representative traffic across key paths
@@ -82,7 +83,7 @@ Run any step as `./harness.sh <app> <cmd>`:
 - `download-tools` — download `weaver` + `otelcol-contrib` to `otel/`
 - `build` — build the app
 - `bootstrap` — one-time setup (e.g. seed a database), if the app defines it
-- `instrument` — generate `.instrument-prompt.<app>.md` (used internally by `run.ts`)
+- `instrument` — generate `tmp/.instrument-prompt.<app>.md` (used internally by `run.ts`)
 - `start` / `stop` / `restart` / `status` — manage the app's server(s) in the background
 - `traffic` — generate representative traffic against the running app
 - `reset [--purge]` — check out the app's `clean` baseline and create a fresh scratch branch

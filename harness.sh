@@ -22,7 +22,7 @@ usage() {
   echo "  reset [--purge]  Check out clean branch and create a new scratch branch"
   echo "  clean            Remove logs/ and .playwright-mcp/"
   echo "  traffic          Generate representative traffic against the running app"
-  echo "  instrument       Write .instrument-prompt.md for clean-context instrumentation"
+  echo "  instrument       Write tmp/.instrument-prompt.<app>.md for clean-context instrumentation"
   exit 1
 }
 
@@ -36,15 +36,18 @@ shift 2
 
 APP_DIR="$APPS_DIR/$APP"
 REPO_DIR="$CHECKOUTS_DIR/$APP"
-# App-scoped so multiple apps can run concurrently without clobbering each other.
+# All generated, run-scoped scratch files live under tmp/ (gitignored) rather than
+# the repo root. App-scoped so multiple apps can run concurrently without clobbering.
+TMP_DIR="$SCRIPT_DIR/tmp"
+mkdir -p "$TMP_DIR"
 LOG_DIR="$SCRIPT_DIR/logs/$APP"
-PID_FILE="$SCRIPT_DIR/.harness.$APP.pids"
+PID_FILE="$TMP_DIR/.harness.$APP.pids"
 # Per-run weaver-capture pipeline (see start_collector / stop_collector). All
 # app-scoped so concurrent runs get isolated ports, configs, and report files.
-COLLECTOR_PID_FILE="$SCRIPT_DIR/.harness.$APP.collector.pid"
-COLLECTOR_CONFIG="$SCRIPT_DIR/.harness.$APP.collector.yaml"
-WEAVER_PID_FILE="$SCRIPT_DIR/.harness.$APP.weaver.pid"
-WEAVER_STATE_FILE="$SCRIPT_DIR/.harness.$APP.weaver.json"
+COLLECTOR_PID_FILE="$TMP_DIR/.harness.$APP.collector.pid"
+COLLECTOR_CONFIG="$TMP_DIR/.harness.$APP.collector.yaml"
+WEAVER_PID_FILE="$TMP_DIR/.harness.$APP.weaver.pid"
+WEAVER_STATE_FILE="$TMP_DIR/.harness.$APP.weaver.json"
 WEAVER_REPORT_DIR="$LOG_DIR/weaver-report"
 # Enabled by default; set HARNESS_WEAVER_CAPTURE=0 to export straight to Honeycomb.
 HARNESS_WEAVER_CAPTURE="${HARNESS_WEAVER_CAPTURE:-1}"
@@ -523,6 +526,8 @@ harness_reset() {
 harness_clean() {
   echo "Removing logs/..."
   rm -rf "$LOG_DIR"
+  echo "Removing tmp/ scratch files for $APP..."
+  rm -f "$TMP_DIR/.harness.$APP".* "$TMP_DIR/.instrument-prompt.$APP.md"
   echo "Removing .playwright-mcp/..."
   rm -rf "$SCRIPT_DIR/.playwright-mcp"
   echo "Clean complete."
@@ -616,7 +621,7 @@ SKILL_SHA=$skill_sha
 SKILL_COMMIT_MSG="$skill_commit_msg"
 EOF
 
-  local prompt_file="$SCRIPT_DIR/.instrument-prompt.$APP.md"
+  local prompt_file="$TMP_DIR/.instrument-prompt.$APP.md"
   {
     if [[ -n "$preamble" ]]; then
       printf '%s\n\n---\n' "$preamble"
