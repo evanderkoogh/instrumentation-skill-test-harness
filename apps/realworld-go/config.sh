@@ -1,0 +1,89 @@
+# RealWorld "Conduit" backend (Go) — app profile for the OTel skill test harness.
+# A Medium-clone REST API built with Gin + GORM + SQLite + JWT.
+# Sourced by harness.sh; defines APP_* variables and cmd_* overrides.
+
+APP_NAME="realworld-go"
+APP_REPO="https://github.com/gothinkster/golang-gin-realworld-example-app.git"
+APP_CLEAN_SHA="626c372d259472148d93303f74aa9b9a1cdcef24"
+APP_CLEAN_BRANCH="main"
+APP_HTTP_PORT=8080
+APP_OTEL_AGENT_TYPE="go"   # SDK-based; no external agent binary (see harness_download_agent)
+APP_DATASET="realworld-go"
+
+BINARY_NAME="conduit"
+
+cmd_build() {
+  if [[ ! -d "$REPO_DIR" ]]; then
+    echo "Repo not found. Run 'download' first." >&2
+    exit 1
+  fi
+  echo "Building (go build ./...)..."
+  ( cd "$REPO_DIR" && go build ./... )
+  echo "Build complete."
+}
+
+cmd_start() {
+  if [[ ! -d "$REPO_DIR" ]]; then
+    echo "Repo not found. Run 'download' first." >&2
+    exit 1
+  fi
+
+  mkdir -p "$LOG_DIR"
+
+  if [[ -f "$PID_FILE" ]]; then
+    echo "PID file exists — server may already be running. Run 'status' to check." >&2
+    exit 1
+  fi
+
+  if port_in_use "$APP_HTTP_PORT"; then
+    echo "Port $APP_HTTP_PORT is already in use." >&2
+    exit 1
+  fi
+
+  # The skill applies instrumentation as code changes, and run.ts builds BEFORE
+  # instrumenting — so (re)build from source here to capture those changes.
+  echo "Compiling $BINARY_NAME from source..."
+  ( cd "$REPO_DIR" && go build -o "$BINARY_NAME" . )
+
+  # SQLite lives under ./data/gorm.db (GORM auto-migrates on boot); ensure the dir exists.
+  mkdir -p "$REPO_DIR/data"
+
+  # Tag spans with the skill version, mirroring broadleaf's start script. The Go OTel
+  # SDK picks these up via OTEL_RESOURCE_ATTRIBUTES (standard env-based resource detection).
+  if [[ -f "$REPO_DIR/.skill-version" ]]; then
+    # shellcheck disable=SC1091
+    source "$REPO_DIR/.skill-version"
+    export OTEL_RESOURCE_ATTRIBUTES="service.instrumentation_skill.branch=${SKILL_BRANCH},service.instrumentation_skill.git_sha=${SKILL_SHA}"
+  fi
+  # Deterministic service name -> Honeycomb dataset for evaluation.
+  export OTEL_SERVICE_NAME="$APP_DATASET"
+  # OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_EXPORTER_OTLP_HEADERS are sourced from .env by harness.sh.
+
+  echo "Starting $APP_NAME on port $APP_HTTP_PORT..."
+  ( cd "$REPO_DIR" && PORT="$APP_HTTP_PORT" "./$BINARY_NAME" ) > "$LOG_DIR/app.log" 2>&1 &
+  local app_pid=$!
+  echo "$app_pid" > "$PID_FILE"
+
+  echo "Waiting for the server to accept requests..."
+  local waited=0
+  until curl -fsS "http://localhost:$APP_HTTP_PORT/api/ping/" > /dev/null 2>&1; do
+    sleep 1
+    if ! kill -0 "$app_pid" 2>/dev/null; then
+      echo "App process died. Check $LOG_DIR/app.log" >&2
+      rm -f "$PID_FILE"
+      exit 1
+    fi
+    (( ++waited ))
+    if (( waited >= 60 )); then
+      echo "Server did not become ready within 60s. Check $LOG_DIR/app.log" >&2
+      exit 1
+    fi
+  done
+
+  echo ""
+  echo "Server is up:"
+  echo "  API -> http://localhost:$APP_HTTP_PORT/api"
+  echo ""
+  echo "Logs: $LOG_DIR/app.log"
+  echo "Stop with: ./harness.sh $APP_NAME stop"
+}
