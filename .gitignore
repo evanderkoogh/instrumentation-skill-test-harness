@@ -8,3 +8,4 @@ otel/
 otelcol-*.ndjson
 .instrument-prompt.md
 .claude/
+agent-skill
