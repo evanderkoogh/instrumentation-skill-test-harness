@@ -1,7 +1,8 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query, type HookInput, type HookJSONOutput } from "@anthropic-ai/claude-agent-sdk";
 import { readFileSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
+import { makeFsGuard, denyReason } from "./sandbox.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 function toolDetail(name: string, input: Record<string, unknown>): string {
@@ -42,7 +43,29 @@ export async function runInstrumentation(
 ): Promise<AgentMetrics> {
   const promptPath = resolve(__dirname, "..", "tmp", `.instrument-prompt.${app}.md`);
   const prompt = readFileSync(promptPath, "utf8");
-  const repoDir = resolve(__dirname, "..", "checkouts", app);
+  const harnessRoot = resolve(__dirname, "..");
+  const repoDir = resolve(harnessRoot, "checkouts", app);
+
+  // Hard sandbox: confine the agent's filesystem access to its own checkout (+ the bundled
+  // weaver in otel/) so it can't read the harness's eval code / EVALUATION.md and overfit
+  // the scoring. Enforced as a PreToolUse hook, which denies authoritatively regardless of
+  // allowedTools. System paths, dependency caches, and /tmp stay reachable for builds.
+  const guard = makeFsGuard({ repoDir, harnessRoot });
+  let sandboxDenials = 0;
+  const fsGuardHook = async (input: HookInput): Promise<HookJSONOutput> => {
+    if (input.hook_event_name !== "PreToolUse") return {};
+    const verdict = guard.inspect(input.tool_name, input.tool_input);
+    if (verdict.allow) return {};
+    sandboxDenials++;
+    console.log(`  [${app}|sandbox] DENY ${input.tool_name} → ${verdict.target}`);
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: denyReason(verdict.target ?? "that path"),
+      },
+    };
+  };
 
   const start = Date.now();
   let toolUses = 0;
@@ -58,6 +81,9 @@ export async function runInstrumentation(
         allowedTools: ["Read", "Write", "Edit", "Bash"],
         cwd: repoDir,
         maxTurns: 150,
+        hooks: {
+          PreToolUse: [{ hooks: [fsGuardHook] }],
+        },
         ...(model ? { model } : {}),
         env: {
           ...process.env,           // inherit auth tokens and PATH
@@ -120,6 +146,10 @@ export async function runInstrumentation(
     } else {
       throw err;
     }
+  }
+
+  if (sandboxDenials > 0) {
+    console.log(`  [${app}|sandbox] blocked ${sandboxDenials} out-of-checkout access attempt(s)`);
   }
 
   return {

@@ -1,7 +1,7 @@
 import { config } from "dotenv";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
-import { writeFileSync, readdirSync } from "fs";
+import { writeFileSync, readdirSync, appendFileSync, mkdirSync } from "fs";
 import { spawn } from "node:child_process";
 import {
   harness,
@@ -67,12 +67,27 @@ if (!queryApiKey) {
   process.exit(1);
 }
 
+// Per-app, run-scoped progress logger. Truncates tmp/run-progress.<app>.log at the
+// start of every run so a `tail -f` only ever shows the CURRENT run for this app —
+// unlike an append-only cross-run log, which mixes stale entries from earlier runs.
+// Mirrors each line to stdout (inherited by the parent in parallel mode) and the file.
+function makeProgressLog(app: string): (line: string) => void {
+  const file = resolve(__dirname, "tmp", `run-progress.${app}.log`);
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, `# run-progress ${app} — ${new Date().toISOString()}\n`);
+  return (line: string) => {
+    console.log(line);
+    appendFileSync(file, line + "\n");
+  };
+}
+
 async function runApp(app: string): Promise<void> {
   const tracer = getTracer();
   const { dataset } = readAppConfig(app);
   const timestamp = new Date().toISOString();
+  const log = makeProgressLog(app);
 
-  console.log(`\n▶ Run: ${app}  dataset: ${dataset}${modelArg ? `  model: ${modelArg}` : ""}`);
+  log(`\n▶ Run: ${app}  dataset: ${dataset}${modelArg ? `  model: ${modelArg}` : ""}`);
 
   await tracer.startActiveSpan(`run`, async (rootSpan) => {
     rootSpan.setAttributes({ app, "run.timestamp": timestamp });
@@ -82,7 +97,7 @@ async function runApp(app: string): Promise<void> {
       // --- Setup ---
       for (const step of ["download", "download-tools", "reset --purge", "build", "bootstrap", "instrument"] as const) {
         const [cmd, ...args] = step.split(" ");
-        console.log(`→ ${step}`);
+        log(`→ ${step}`);
         await tracer.startActiveSpan(step, async (span) => {
           try {
             harness(app, cmd, ...args);
@@ -96,7 +111,7 @@ async function runApp(app: string): Promise<void> {
       }
 
       const skill = readSkillVersion(app);
-      console.log(`  skill: ${skill.branch} @ ${skill.sha}`);
+      log(`  skill: ${skill.branch} @ ${skill.sha}`);
       rootSpan.setAttributes({
         "skill.branch": skill.branch,
         "skill.sha": skill.sha,
@@ -104,7 +119,7 @@ async function runApp(app: string): Promise<void> {
       });
 
       // --- Instrumentation agent ---
-      console.log("→ running instrumentation agent");
+      log("→ running instrumentation agent");
       const agentMetrics = await tracer.startActiveSpan("instrumentation-agent", async (span) => {
         try {
           const metrics = await runInstrumentation(app, ingestKey, modelArg, skill);
@@ -125,7 +140,7 @@ async function runApp(app: string): Promise<void> {
           span.end();
         }
       });
-      console.log(
+      log(
         `  done: ${agentMetrics.tool_uses} tool calls · ${agentMetrics.total_tokens} tokens · ${(agentMetrics.duration_ms / 1000).toFixed(1)}s`
       );
       rootSpan.setAttributes({
@@ -153,7 +168,7 @@ async function runApp(app: string): Promise<void> {
       };
 
       // --- Start ---
-      console.log("→ start");
+      log("→ start");
       harness(app, "stop");
       try {
         await tracer.startActiveSpan("start", async (span) => {
@@ -172,7 +187,7 @@ async function runApp(app: string): Promise<void> {
           rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: "startup failed" });
           const record = { ...baseRecord, failed: true, failure_reason: err.reason, criteria: undefined };
           recordRun(record);
-          printSummary(record);
+          printSummary(record, log);
           harness(app, "stop");
           return;
         }
@@ -180,7 +195,7 @@ async function runApp(app: string): Promise<void> {
       }
 
       // --- Traffic + flush ---
-      console.log("→ traffic");
+      log("→ traffic");
       await tracer.startActiveSpan("traffic", async (span) => {
         try {
           harness(app, "traffic");
@@ -188,14 +203,14 @@ async function runApp(app: string): Promise<void> {
           span.end();
         }
       });
-      console.log("→ waiting 15s for spans to flush");
+      log("→ waiting 15s for spans to flush");
       await sleep(15_000);
 
       // --- Evaluate ---
       // Honeycomb query criteria + the local weaver live-check verdict. Both run after the
       // flush wait: evaluate() reads Honeycomb; runWeaverLiveCheck() finalizes the weaver
       // OTLP receiver (POST /stop) and parses its report. They're independent.
-      console.log("→ evaluating");
+      log("→ evaluating");
       const { criteria, weaver } = await tracer.startActiveSpan("evaluate", async (span) => {
         try {
           const [hc, weaverResult] = await Promise.all([
@@ -247,7 +262,7 @@ async function runApp(app: string): Promise<void> {
 
       const record = { ...baseRecord, failed: false, failure_reason: null, criteria, weaver };
       recordRun(record);
-      printSummary(record);
+      printSummary(record, log);
 
       harness(app, "stop");
     } catch (err) {
