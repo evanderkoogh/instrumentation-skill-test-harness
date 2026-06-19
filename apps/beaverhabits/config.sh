@@ -14,6 +14,22 @@ cmd_build() {
     exit 1
   fi
   export PATH="$HOME/.local/bin:$PATH"
+
+  # uv console scripts (e.g. .venv/bin/uvicorn) hardcode the venv's absolute
+  # python path in their shebang. If the checkout dir was moved or renamed
+  # (e.g. scratch_dir -> code), those shebangs point at a path that no longer
+  # exists and `uv sync` will happily reuse the venv, so `start` later dies with
+  # "bad interpreter". (.venv/bin/python itself is a symlink to the uv-managed
+  # interpreter and keeps resolving, so it can't be used to detect this.)
+  # Detect a stale console-script shebang and recreate the venv from scratch.
+  if [[ -f "$REPO_DIR/.venv/bin/uvicorn" ]]; then
+    shebang_py="$(sed -n '1s/^#!//p' "$REPO_DIR/.venv/bin/uvicorn")"
+    if [[ -n "$shebang_py" && ! -x "$shebang_py" ]]; then
+      echo "Stale .venv detected (console-script interpreter '$shebang_py' missing) — recreating..."
+      rm -rf "$REPO_DIR/.venv"
+    fi
+  fi
+
   echo "Installing dependencies with uv..."
   (cd "$REPO_DIR" && uv sync)
   echo "Build complete."
