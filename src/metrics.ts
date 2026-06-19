@@ -3,6 +3,7 @@ import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 import type { AgentMetrics } from "./instrumentation.js";
 import type { EvaluationResults } from "./evaluation.js";
+import type { WeaverResult } from "./weaver.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const RUNS_FILE = resolve(__dirname, "..", "runs.jsonl");
@@ -17,6 +18,8 @@ export interface RunRecord {
   failure_reason: string | null;
   agent: AgentMetrics;
   criteria?: EvaluationResults;
+  // Full weaver live-check report (the weaver_live_check criterion is the headline).
+  weaver?: WeaverResult;
 }
 
 export function recordRun(record: RunRecord): void {
@@ -24,7 +27,7 @@ export function recordRun(record: RunRecord): void {
 }
 
 export function printSummary(record: RunRecord): void {
-  const { app, skill_branch, skill_sha, failed, failure_reason, agent, criteria } =
+  const { app, skill_branch, skill_sha, failed, failure_reason, agent, criteria, weaver } =
     record;
 
   console.log("\n" + "─".repeat(60));
@@ -43,6 +46,14 @@ export function printSummary(record: RunRecord): void {
       const icon = val.pass ? "✅" : "❌";
       const detail = val.value !== undefined ? ` (${JSON.stringify(val.value)})` : "";
       console.log(`  ${icon} ${key}${detail}`);
+    }
+    if (weaver && !weaver.skipped) {
+      console.log(
+        `  weaver: ${weaver.violations} violations · ${weaver.improvements} improvements · ` +
+          `${weaver.total_entities} entities · registry: ${weaver.registry}`
+      );
+    } else if (weaver?.skipped) {
+      console.log(`  weaver: skipped (${weaver.reason})`);
     }
   }
   console.log("─".repeat(60));

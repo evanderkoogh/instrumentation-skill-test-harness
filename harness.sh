@@ -6,12 +6,13 @@ APPS_DIR="$SCRIPT_DIR/apps"
 CHECKOUTS_DIR="$SCRIPT_DIR/checkouts"
 
 usage() {
-  echo "Usage: $(basename "$0") <app> {download|download-agent|build|bootstrap|start|stop|restart|status|reset [--purge]|clean|traffic|instrument}"
+  echo "Usage: $(basename "$0") <app> {download|download-agent|download-tools|build|bootstrap|start|stop|restart|status|reset [--purge]|clean|traffic|instrument}"
   echo ""
   echo "  <app>            App profile name (directory under apps/)"
   echo ""
   echo "  download         Clone the app repo (skips if already present)"
   echo "  download-agent   Download or install the OTel agent for this app type"
+  echo "  download-tools   Download weaver + otelcol-contrib binaries into otel/"
   echo "  build            Build the application"
   echo "  bootstrap        Run one-time setup (e.g. seed database)"
   echo "  start            Start the application in the background"
@@ -38,6 +39,15 @@ REPO_DIR="$CHECKOUTS_DIR/$APP"
 # App-scoped so multiple apps can run concurrently without clobbering each other.
 LOG_DIR="$SCRIPT_DIR/logs/$APP"
 PID_FILE="$SCRIPT_DIR/.harness.$APP.pids"
+# Per-run weaver-capture pipeline (see start_collector / stop_collector). All
+# app-scoped so concurrent runs get isolated ports, configs, and report files.
+COLLECTOR_PID_FILE="$SCRIPT_DIR/.harness.$APP.collector.pid"
+COLLECTOR_CONFIG="$SCRIPT_DIR/.harness.$APP.collector.yaml"
+WEAVER_PID_FILE="$SCRIPT_DIR/.harness.$APP.weaver.pid"
+WEAVER_STATE_FILE="$SCRIPT_DIR/.harness.$APP.weaver.json"
+WEAVER_REPORT_DIR="$LOG_DIR/weaver-report"
+# Enabled by default; set HARNESS_WEAVER_CAPTURE=0 to export straight to Honeycomb.
+HARNESS_WEAVER_CAPTURE="${HARNESS_WEAVER_CAPTURE:-1}"
 
 # Load .env if present
 if [[ -f "$SCRIPT_DIR/.env" ]]; then
@@ -60,6 +70,30 @@ port_in_use() {
   lsof -ti tcp:"$1" > /dev/null 2>&1
 }
 
+# Pick a currently-unused TCP port in the ephemeral-ish range. Randomized start so
+# concurrent runs are unlikely to collide; the collector logs a bind error (caught
+# downstream) in the rare race.
+free_port() {
+  local p tries=0
+  while (( tries < 200 )); do
+    p=$(( 20000 + RANDOM % 20000 ))
+    if ! port_in_use "$p"; then echo "$p"; return 0; fi
+    (( tries++ ))
+  done
+  echo "free_port: no free port found" >&2
+  return 1
+}
+
+# Locate the weaver registry the skill created somewhere in the checkout. A weaver
+# registry is a directory containing a manifest — modern `manifest.yaml` or the legacy
+# `registry_manifest.yaml`. Prints the registry directory, or nothing if none is found.
+find_registry() {
+  local manifest
+  manifest=$(find "$REPO_DIR" \( -name manifest.yaml -o -name registry_manifest.yaml \) \
+    -not -path '*/node_modules/*' -not -path '*/.git/*' 2>/dev/null | head -1)
+  [[ -n "$manifest" ]] && dirname "$manifest"
+}
+
 make_scratch_branch() {
   local base="scratch_$(date +%Y-%m-%d)"
   local branch="$base"
@@ -69,6 +103,138 @@ make_scratch_branch() {
     (( index++ ))
   done
   echo "$branch"
+}
+
+# Bring up the per-run weaver-capture pipeline:
+#
+#   app --OTLP--> otelcol-contrib --+--otlphttp--> Honeycomb  (existing query eval)
+#                                   +--otlp------> weaver registry live-check (OTLP receiver)
+#
+# weaver scores the live telemetry against the registry the skill created. The report is
+# finalized + read by src/weaver.ts (it POSTs the weaver admin /stop endpoint, then reads
+# live_check.json). Dynamically-allocated ports + app-scoped config/pid/state/report keep
+# concurrent runs isolated. On any problem we warn and fall back to direct-to-Honeycomb
+# export rather than aborting the run.
+start_collector() {
+  [[ "$HARNESS_WEAVER_CAPTURE" == "1" ]] || return 0
+  local col_bin="$SCRIPT_DIR/otel/otelcol-contrib"
+  local weaver_bin="$SCRIPT_DIR/otel/weaver"
+  local template="$SCRIPT_DIR/collector.template.yaml"
+  if [[ ! -x "$col_bin" || ! -x "$weaver_bin" || ! -f "$template" ]]; then
+    echo "weaver-capture tooling unavailable (run 'download-tools') — exporting straight to Honeycomb." >&2
+    return 0
+  fi
+
+  # Real Honeycomb destination, captured BEFORE we override the app's env below.
+  local hc_endpoint="${OTEL_EXPORTER_OTLP_ENDPOINT:-https://api.honeycomb.io}"
+  local hc_key=""
+  if [[ -n "${OTEL_EXPORTER_OTLP_HEADERS:-}" ]]; then
+    hc_key=$(printf '%s' "$OTEL_EXPORTER_OTLP_HEADERS" | sed -E 's/.*x-honeycomb-team=([^,]+).*/\1/')
+  fi
+
+  local weaver_grpc weaver_admin col_grpc col_http
+  weaver_grpc=$(free_port); weaver_admin=$(free_port)
+  col_grpc=$(free_port);    col_http=$(free_port)
+
+  mkdir -p "$LOG_DIR"
+  rm -rf "$WEAVER_REPORT_DIR"; mkdir -p "$WEAVER_REPORT_DIR"
+
+  # Prefer the registry the skill created in the checkout (auto-discovered); else weaver's
+  # upstream semconv default.
+  local registry_dir registry_arg=() registry_used="upstream-semconv"
+  registry_dir=$(find_registry)
+  if [[ -n "$registry_dir" ]]; then
+    registry_arg=(--registry "$registry_dir")
+    registry_used="$registry_dir"
+  fi
+
+  echo "Starting weaver live-check receiver (grpc:$weaver_grpc admin:$weaver_admin registry:$registry_used)..."
+  # Long inactivity timeout: src/weaver.ts explicitly finalizes via the admin /stop endpoint.
+  "$weaver_bin" registry live-check \
+    --input-source otlp \
+    --otlp-grpc-address 127.0.0.1 --otlp-grpc-port "$weaver_grpc" \
+    --admin-port "$weaver_admin" \
+    "${registry_arg[@]}" \
+    --format json --output "$WEAVER_REPORT_DIR" \
+    --inactivity-timeout 600 > "$LOG_DIR/weaver.log" 2>&1 &
+  local weaver_pid=$!
+  echo "$weaver_pid" > "$WEAVER_PID_FILE"
+
+  local waited=0
+  until grep -q "OTLP receiver will stop" "$LOG_DIR/weaver.log" 2>/dev/null; do
+    sleep 1
+    if ! kill -0 "$weaver_pid" 2>/dev/null; then
+      echo "weaver failed to start — check $LOG_DIR/weaver.log. Falling back to direct export." >&2
+      rm -f "$WEAVER_PID_FILE"; return 0
+    fi
+    (( ++waited ))
+    if (( waited >= 60 )); then
+      echo "weaver not ready within 60s — check $LOG_DIR/weaver.log. Falling back to direct export." >&2
+      kill "$weaver_pid" 2>/dev/null || true; rm -f "$WEAVER_PID_FILE"; return 0
+    fi
+  done
+
+  sed \
+    -e "s|%COLLECTOR_GRPC_PORT%|$col_grpc|g" \
+    -e "s|%COLLECTOR_HTTP_PORT%|$col_http|g" \
+    -e "s|%HONEYCOMB_ENDPOINT%|$hc_endpoint|g" \
+    -e "s|%API_KEY%|$hc_key|g" \
+    -e "s|%WEAVER_GRPC_ENDPOINT%|127.0.0.1:$weaver_grpc|g" \
+    "$template" > "$COLLECTOR_CONFIG"
+
+  echo "Starting fan-out collector (app http:$col_http -> Honeycomb + weaver)..."
+  "$col_bin" --config "$COLLECTOR_CONFIG" > "$LOG_DIR/collector.log" 2>&1 &
+  local col_pid=$!
+  echo "$col_pid" > "$COLLECTOR_PID_FILE"
+
+  waited=0
+  until port_in_use "$col_http"; do
+    sleep 1
+    if ! kill -0 "$col_pid" 2>/dev/null; then
+      echo "Collector failed to start — check $LOG_DIR/collector.log. Falling back to direct export." >&2
+      rm -f "$COLLECTOR_PID_FILE"; kill "$weaver_pid" 2>/dev/null || true; rm -f "$WEAVER_PID_FILE"
+      return 0
+    fi
+    (( ++waited ))
+    if (( waited >= 20 )); then
+      echo "Collector not ready within 20s — check $LOG_DIR/collector.log. Falling back to direct export." >&2
+      return 0
+    fi
+  done
+
+  # State for src/weaver.ts to finalize (POST /stop) and read the report.
+  cat > "$WEAVER_STATE_FILE" <<EOF
+{"adminPort": $weaver_admin, "reportFile": "$WEAVER_REPORT_DIR/live_check.json", "registry": "$registry_used"}
+EOF
+
+  # Point the app's OTLP exporter at the local collector. cmd_start launches the app in
+  # a subshell that inherits this exported env; the collector forwards to the real
+  # Honeycomb endpoint/key captured above.
+  export OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:$col_http"
+  export OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf"
+  export OTEL_EXPORTER_OTLP_HEADERS=""
+  echo "App OTLP export -> $OTEL_EXPORTER_OTLP_ENDPOINT (fan-out to Honeycomb + weaver live-check)"
+}
+
+stop_collector() {
+  local pid
+  if [[ -f "$COLLECTOR_PID_FILE" ]]; then
+    pid=$(cat "$COLLECTOR_PID_FILE")
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "Stopping fan-out collector (PID $pid)..."
+      kill "$pid"
+    fi
+    rm -f "$COLLECTOR_PID_FILE" "$COLLECTOR_CONFIG"
+  fi
+  if [[ -f "$WEAVER_PID_FILE" ]]; then
+    pid=$(cat "$WEAVER_PID_FILE")
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "Stopping weaver live-check (PID $pid)..."
+      kill "$pid"
+    fi
+    rm -f "$WEAVER_PID_FILE"
+  fi
+  rm -f "$WEAVER_STATE_FILE"
 }
 
 # --- Generic implementations (harness_*) ---
@@ -128,6 +294,91 @@ harness_download_agent() {
   esac
 }
 
+# Download the weaver + otelcol-contrib binaries into otel/ (idempotent).
+# - weaver: the live-check tool the evaluation runs, and that the skill uses to
+#   validate the registry it creates. Its release assets are version-less, so the
+#   GitHub "latest" redirect works.
+# - otelcol-contrib: the per-run collector that fans telemetry out to Honeycomb AND
+#   a capture file (the core collector lacks the `file` exporter). Its asset filename
+#   embeds the version, so resolve the latest tag from the API (override with
+#   OTELCOL_VERSION=x.y.z to pin).
+harness_download_tools() {
+  mkdir -p "$SCRIPT_DIR/otel"
+  local uname_s uname_m
+  uname_s=$(uname -s)
+  uname_m=$(uname -m)
+
+  # --- weaver ---
+  local weaver_bin="$SCRIPT_DIR/otel/weaver"
+  if [[ -x "$weaver_bin" ]]; then
+    echo "weaver already present: $weaver_bin"
+  else
+    local w_arch w_os
+    case "$uname_m" in
+      arm64|aarch64) w_arch="aarch64" ;;
+      x86_64|amd64)  w_arch="x86_64" ;;
+      *) echo "Unsupported arch for weaver: $uname_m" >&2; exit 1 ;;
+    esac
+    case "$uname_s" in
+      Darwin) w_os="apple-darwin" ;;
+      Linux)  w_os="unknown-linux-gnu" ;;
+      *) echo "Unsupported OS for weaver: $uname_s" >&2; exit 1 ;;
+    esac
+    local w_asset="weaver-${w_arch}-${w_os}.tar.xz"
+    echo "Downloading weaver ($w_asset)..."
+    local tmp; tmp=$(mktemp -d)
+    curl -fL -o "$tmp/$w_asset" \
+      "https://github.com/open-telemetry/weaver/releases/latest/download/${w_asset}"
+    tar -xJf "$tmp/$w_asset" -C "$tmp"
+    local found; found=$(find "$tmp" -type f -name weaver | head -1)
+    [[ -n "$found" ]] || { echo "weaver binary not found in archive" >&2; exit 1; }
+    mv "$found" "$weaver_bin"
+    chmod +x "$weaver_bin"
+    rm -rf "$tmp"
+    echo "Installed: $weaver_bin"
+  fi
+
+  # --- otelcol-contrib ---
+  local col_bin="$SCRIPT_DIR/otel/otelcol-contrib"
+  if [[ -x "$col_bin" ]]; then
+    echo "otelcol-contrib already present: $col_bin"
+  else
+    local c_arch c_os
+    case "$uname_m" in
+      arm64|aarch64) c_arch="arm64" ;;
+      x86_64|amd64)  c_arch="amd64" ;;
+      *) echo "Unsupported arch for otelcol: $uname_m" >&2; exit 1 ;;
+    esac
+    case "$uname_s" in
+      Darwin) c_os="darwin" ;;
+      Linux)  c_os="linux" ;;
+      *) echo "Unsupported OS for otelcol: $uname_s" >&2; exit 1 ;;
+    esac
+    local tmp; tmp=$(mktemp -d)
+    local col_version="${OTELCOL_VERSION:-}"
+    if [[ -z "$col_version" ]]; then
+      echo "Resolving latest otelcol-contrib version..."
+      # Fetch to a file first: piping curl into `grep -m1` closes the pipe early,
+      # which trips `set -o pipefail` and aborts the script.
+      curl -fsSL https://api.github.com/repos/open-telemetry/opentelemetry-collector-releases/releases/latest \
+        -o "$tmp/release.json"
+      col_version=$(grep -m1 '"tag_name"' "$tmp/release.json" | sed -E 's/.*"v?([^"]+)".*/\1/')
+    fi
+    [[ -n "$col_version" ]] || { echo "Could not resolve otelcol-contrib version" >&2; exit 1; }
+    local c_asset="otelcol-contrib_${col_version}_${c_os}_${c_arch}.tar.gz"
+    echo "Downloading otelcol-contrib v$col_version ($c_asset)..."
+    curl -fL -o "$tmp/$c_asset" \
+      "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v${col_version}/${c_asset}"
+    tar -xzf "$tmp/$c_asset" -C "$tmp"
+    local found; found=$(find "$tmp" -type f -name otelcol-contrib | head -1)
+    [[ -n "$found" ]] || { echo "otelcol-contrib binary not found in archive" >&2; exit 1; }
+    mv "$found" "$col_bin"
+    chmod +x "$col_bin"
+    rm -rf "$tmp"
+    echo "Installed: $col_bin (v$col_version)"
+  fi
+}
+
 harness_build() {
   echo "No build command defined for '$APP'. Add cmd_build() to apps/$APP/config.sh." >&2
   exit 1
@@ -143,6 +394,8 @@ harness_start() {
 }
 
 harness_stop() {
+  # Always tear down the capture collector, even if the app PID file is gone.
+  stop_collector
   if [[ ! -f "$PID_FILE" ]]; then
     echo "No PID file found — servers may not be running."
     return
@@ -290,18 +543,25 @@ harness_traffic() {
 }
 
 harness_instrument() {
-  local plugin_base="$HOME/.claude/plugins/cache/honeycomb-plugins/honeycomb"
-  local latest_version
-  latest_version=$(ls "$plugin_base" | sort -V | tail -1)
-  local plugin_link="$plugin_base/$latest_version"
-  local claude_plugin_root
-  if [[ -L "$plugin_link" ]]; then
-    claude_plugin_root=$(readlink "$plugin_link")
-  else
-    claude_plugin_root="$plugin_link"
-  fi
-
+  # The marketplace symlink points at the in-development skill repo; the extracted
+  # plugin cache is a (potentially stale) published copy. Read CONTENT from the
+  # marketplace path so runs exercise the same skill the version metadata is taken
+  # from. Fall back to the cache only if the marketplace layout isn't present.
+  local skill_git_root="$HOME/.claude/plugins/marketplaces/honeycomb-plugins"
+  local claude_plugin_root="$skill_git_root/honeycomb"
   local skill_file="$claude_plugin_root/skills/otel-instrumentation/SKILL.md"
+  if [[ ! -f "$skill_file" ]]; then
+    local plugin_base="$HOME/.claude/plugins/cache/honeycomb-plugins/honeycomb"
+    local latest_version
+    latest_version=$(ls "$plugin_base" 2>/dev/null | sort -V | tail -1)
+    local plugin_link="$plugin_base/$latest_version"
+    if [[ -L "$plugin_link" ]]; then
+      claude_plugin_root=$(readlink "$plugin_link")
+    else
+      claude_plugin_root="$plugin_link"
+    fi
+    skill_file="$claude_plugin_root/skills/otel-instrumentation/SKILL.md"
+  fi
   if [[ ! -f "$skill_file" ]]; then
     echo "Skill not found at: $skill_file" >&2
     exit 1
@@ -321,8 +581,8 @@ harness_instrument() {
   local skill_content
   skill_content=$(sed "s|\${CLAUDE_PLUGIN_ROOT}|$claude_plugin_root|g" "$skill_file")
 
-  # The cache is an extracted copy with no .git; the marketplace symlink points to the actual repo
-  local skill_git_root="$HOME/.claude/plugins/marketplaces/honeycomb-plugins"
+  # skill_git_root (the marketplace symlink → dev repo) is set at the top of this
+  # function; it has a .git so we can read the branch/SHA the content came from.
   local skill_branch skill_sha
   skill_branch=$(git -C "$skill_git_root" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
   skill_sha=$(git -C "$skill_git_root" rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -366,7 +626,7 @@ EOF
   } > "$prompt_file"
 
   echo "Agent prompt written to: $prompt_file"
-  echo "Skill: $skill_branch @ $skill_sha (plugin version: $latest_version)"
+  echo "Skill: $skill_branch @ $skill_sha (source: $claude_plugin_root)"
   echo ""
   echo "Next: spawn a clean-context Agent using the Agent tool, with the contents"
   echo "of $prompt_file as the prompt."
@@ -378,6 +638,11 @@ dispatch() {
   local cmd="$1"
   shift
   local func_name="${cmd//-/_}"
+  # Bring up the weaver-capture collector and redirect the app's OTLP export before
+  # the app starts (start_collector exports the override env this shell passes on).
+  if [[ "$func_name" == "start" ]]; then
+    start_collector
+  fi
   if declare -f "cmd_${func_name}" > /dev/null 2>&1; then
     "cmd_${func_name}" "$@"
   elif declare -f "harness_${func_name}" > /dev/null 2>&1; then

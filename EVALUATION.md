@@ -86,6 +86,24 @@ ORDER: COUNT descending
 If a single span name accounts for millions of spans in a short window, the skill likely
 added spans in a loop or on a trivial helper. Flag this as an anti-pattern.
 
+### 8. Semantic-convention registry — weaver live-check
+
+Not a Honeycomb query. During the run the app's telemetry is fanned out (via a per-run
+OTel Collector) to both Honeycomb **and** a `weaver registry live-check` OTLP receiver,
+which scores the live telemetry against the weaver registry the skill created in the
+checkout (skill step "Create weaver registry"). The harness auto-discovers the registry
+(a directory containing `manifest.yaml`).
+
+Expect: the skill created a custom registry (`registry_custom: true`), telemetry reached
+weaver (`total_entities > 0`), and there are **0 violations** against that registry.
+Improvements/information advisories are surfaced but do not fail the criterion. The full
+advice report (violation/improvement counts by advice type) is recorded in `runs.jsonl`
+under `weaver`.
+
+This requires the bundled tooling (`./harness.sh <app> download-tools` fetches
+`otel/weaver` + `otel/otelcol-contrib`); if unavailable the criterion is skipped and the
+app exports straight to Honeycomb (the other criteria are unaffected).
+
 ## Scoring guide
 
 | Criteria | Weight | Notes |
@@ -94,4 +112,5 @@ added spans in a loop or on a trivial helper. Flag this as an anti-pattern.
 | 5 (trace completeness) | High value | Confirms context propagation works |
 | 6 (no rootless traces) | Disqualifier | Indicates export or sampling misconfiguration |
 | 7 (no explosion) | Disqualifier | One failure voids quality criteria |
+| 8 (weaver live-check) | High value | Skill must create a registry; telemetry must match it |
 | App-specific criteria | High value | See apps/<app>/EVALUATION.md |

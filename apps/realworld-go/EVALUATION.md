@@ -59,3 +59,7 @@ article spans. Distinguishes thoughtful instrumentation from defaults.
 | 2 (route templates, not raw slugs) | Required-ish | Raw slugs = high-cardinality anti-pattern |
 | 8 (user context) | High value | Business context beyond defaults |
 | 9 (article/domain context) | High value | Distinguishes skill quality |
+
+The weaver registry the skill creates should declare the custom attributes above
+(e.g. `app.user.id`, `app.article.slug`); `weaver_live_check` validates the emitted
+telemetry against it. See the root `EVALUATION.md` for the weaver criterion.

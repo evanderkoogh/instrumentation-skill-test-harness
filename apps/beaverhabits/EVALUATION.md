@@ -48,3 +48,7 @@ for page loads are complete traces, not orphaned from their WebSocket context.
 | --- | --- | --- |
 | 7 (user context) | High value | Business context beyond defaults |
 | 8 (async connectivity) | High value | NiceGUI-specific propagation check |
+
+The weaver registry the skill creates should declare the custom attributes above
+(e.g. user/habit identifiers); `weaver_live_check` validates the emitted telemetry against
+it. See the root `EVALUATION.md` for the weaver criterion.

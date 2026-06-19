@@ -153,7 +153,8 @@ export interface CriterionResult {
   value?: unknown;
 }
 
-export interface EvaluationResults {
+// Criteria derived from querying Honeycomb (what evaluate() computes).
+export interface HoneycombCriteria {
   spans_arriving: CriterionResult;
   service_name: CriterionResult;
   http_routes: CriterionResult;
@@ -164,10 +165,16 @@ export interface EvaluationResults {
   current_semconv: CriterionResult;
 }
 
+// Full criteria set recorded for a run: the Honeycomb criteria plus the local
+// weaver live-check verdict (computed separately in run.ts via src/weaver.ts).
+export interface EvaluationResults extends HoneycombCriteria {
+  weaver_live_check: CriterionResult;
+}
+
 export async function evaluate(
   dataset: string,
   apiKey: string
-): Promise<EvaluationResults> {
+): Promise<HoneycombCriteria> {
   const [spans, serviceNames, httpRoutes, dbResult, skillVersion, rootless, explosion, columns] =
     await Promise.all([
       runQuery(dataset, { calculations: [{ op: "COUNT" }] }, apiKey),

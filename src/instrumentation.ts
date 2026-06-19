@@ -5,12 +5,15 @@ import { fileURLToPath } from "url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 function toolDetail(name: string, input: Record<string, unknown>): string {
-  const trunc = (s: unknown, n = 80) => String(s ?? "").replace(/\s+/g, " ").slice(0, n);
+  const clean = (s: unknown) => String(s ?? "").replace(/\s+/g, " ");
+  const trunc = (s: unknown, n = 80) => clean(s).slice(0, n);
   switch (name) {
-    case "Read":    return ` ${trunc(input.file_path)}`;
-    case "Write":   return ` ${trunc(input.file_path)}`;
-    case "Edit":    return ` ${trunc(input.file_path)}`;
-    case "Bash":    return `  ${trunc(input.command)}`;
+    // File paths are shown in full so the checkout-only constraint is auditable from logs.
+    case "Read":    return ` ${clean(input.file_path)}`;
+    case "Write":   return ` ${clean(input.file_path)}`;
+    case "Edit":    return ` ${clean(input.file_path)}`;
+    // Bash commands can be arbitrarily long; keep these capped.
+    case "Bash":    return `  ${trunc(input.command, 120)}`;
     default:        return "";
   }
 }
@@ -54,10 +57,13 @@ export async function runInstrumentation(
       options: {
         allowedTools: ["Read", "Write", "Edit", "Bash"],
         cwd: repoDir,
-        maxTurns: 100,
+        maxTurns: 150,
         ...(model ? { model } : {}),
         env: {
           ...process.env,           // inherit auth tokens and PATH
+          // Make the bundled `weaver` binary callable by the agent (skill step
+          // "Create weaver registry" has it run `weaver registry check` to self-validate).
+          PATH: `${resolve(__dirname, "..", "otel")}:${process.env.PATH ?? ""}`,
           CLAUDE_CODE_ENABLE_TELEMETRY: "1",
           CLAUDE_CODE_ENHANCED_TELEMETRY_BETA: "1",
           OTEL_TRACES_EXPORTER: "otlp",

@@ -12,7 +12,8 @@ import {
   StartupFailure,
 } from "./src/harness.js";
 import { runInstrumentation } from "./src/instrumentation.js";
-import { evaluate } from "./src/evaluation.js";
+import { evaluate, type EvaluationResults } from "./src/evaluation.js";
+import { runWeaverLiveCheck } from "./src/weaver.js";
 import { recordRun, printSummary } from "./src/metrics.js";
 import { initTracing, shutdownTracing, getTracer } from "./src/otel.js";
 import { SpanStatusCode } from "@opentelemetry/api";
@@ -79,7 +80,7 @@ async function runApp(app: string): Promise<void> {
 
     try {
       // --- Setup ---
-      for (const step of ["download", "reset --purge", "build", "bootstrap", "instrument"] as const) {
+      for (const step of ["download", "download-tools", "reset --purge", "build", "bootstrap", "instrument"] as const) {
         const [cmd, ...args] = step.split(" ");
         console.log(`→ ${step}`);
         await tracer.startActiveSpan(step, async (span) => {
@@ -191,17 +192,40 @@ async function runApp(app: string): Promise<void> {
       await sleep(15_000);
 
       // --- Evaluate ---
+      // Honeycomb query criteria + the local weaver live-check verdict. Both run after the
+      // flush wait: evaluate() reads Honeycomb; runWeaverLiveCheck() finalizes the weaver
+      // OTLP receiver (POST /stop) and parses its report. They're independent.
       console.log("→ evaluating");
-      const criteria = await tracer.startActiveSpan("evaluate", async (span) => {
+      const { criteria, weaver } = await tracer.startActiveSpan("evaluate", async (span) => {
         try {
-          const results = await evaluate(dataset, queryApiKey);
-          for (const [key, val] of Object.entries(results)) {
+          const [hc, weaverResult] = await Promise.all([
+            evaluate(dataset, queryApiKey),
+            runWeaverLiveCheck(app),
+          ]);
+          const merged: EvaluationResults = {
+            ...hc,
+            weaver_live_check: {
+              pass: weaverResult.pass,
+              value: weaverResult.skipped
+                ? `skipped: ${weaverResult.reason}`
+                : `${weaverResult.violations} violations, ${weaverResult.improvements} improvements (registry: ${weaverResult.registry})`,
+            },
+          };
+          for (const [key, val] of Object.entries(merged)) {
             span.setAttribute(`criterion.${key}.pass`, val.pass);
             if (val.value !== undefined) {
               span.setAttribute(`criterion.${key}.value`, JSON.stringify(val.value));
             }
           }
-          return results;
+          if (!weaverResult.skipped) {
+            span.setAttributes({
+              "weaver.violations": weaverResult.violations ?? 0,
+              "weaver.improvements": weaverResult.improvements ?? 0,
+              "weaver.total_entities": weaverResult.total_entities ?? 0,
+              "weaver.registry": weaverResult.registry ?? "",
+            });
+          }
+          return { criteria: merged, weaver: weaverResult };
         } catch (err) {
           span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
           throw err;
@@ -221,7 +245,7 @@ async function runApp(app: string): Promise<void> {
         rootSpan.setAttribute(`criterion.${key}.pass`, val.pass);
       }
 
-      const record = { ...baseRecord, failed: false, failure_reason: null, criteria };
+      const record = { ...baseRecord, failed: false, failure_reason: null, criteria, weaver };
       recordRun(record);
       printSummary(record);
 

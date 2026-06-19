@@ -1,0 +1,47 @@
+# Per-run OTel Collector config — rendered by harness.sh start_collector() with
+# `sed` (%PLACEHOLDER% substitution, same mechanism as the instrument prompt).
+#
+# The collector sits between the app and Honeycomb so the app's telemetry can be
+# fanned out to BOTH:
+#   - Honeycomb (otlphttp/honeycomb) — keeps the existing query-based evaluation working
+#   - weaver    (otlp/weaver)        — a `weaver registry live-check` OTLP receiver that
+#                                       scores the telemetry against the registry
+#
+# NOTE: weaver's `--input-format json` is NOT OTLP — it expects weaver's own sample
+# schema. So we feed weaver live via its native OTLP receiver instead of a capture file.
+# weaver's gRPC receiver rejects gzip, hence `compression: none` on otlp/weaver.
+#
+# Ports are dynamically allocated per run so concurrent app runs never collide.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 127.0.0.1:%COLLECTOR_GRPC_PORT%
+      http:
+        endpoint: 127.0.0.1:%COLLECTOR_HTTP_PORT%
+
+exporters:
+  otlphttp/honeycomb:
+    endpoint: %HONEYCOMB_ENDPOINT%
+    headers:
+      x-honeycomb-team: %API_KEY%
+  otlp/weaver:
+    endpoint: %WEAVER_GRPC_ENDPOINT%
+    compression: none
+    tls:
+      insecure: true
+
+service:
+  telemetry:
+    logs:
+      level: warn
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [otlphttp/honeycomb, otlp/weaver]
+    metrics:
+      receivers: [otlp]
+      exporters: [otlphttp/honeycomb, otlp/weaver]
+    logs:
+      receivers: [otlp]
+      exporters: [otlphttp/honeycomb, otlp/weaver]

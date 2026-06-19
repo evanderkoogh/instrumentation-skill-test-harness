@@ -47,3 +47,7 @@ Expect: `payment.type` and `order.item_count` present on checkout spans.
 | --- | --- | --- |
 | 7 (cart product.id) | High value | Business context beyond defaults |
 | 8 (checkout context) | High value | Distinguishes skill quality |
+
+The weaver registry the skill creates should declare the custom attributes above
+(e.g. `product.id`, `payment.type`, `order.item_count`); `weaver_live_check` validates the
+emitted telemetry against it. See the root `EVALUATION.md` for the weaver criterion.

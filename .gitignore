@@ -5,6 +5,10 @@ logs/
 otel/
 .harness.pids
 .harness.*.pids
+.harness.*.collector.pid
+.harness.*.collector.yaml
+.harness.*.weaver.pid
+.harness.*.weaver.json
 .env
 otelcol-*.ndjson
 .instrument-prompt.md

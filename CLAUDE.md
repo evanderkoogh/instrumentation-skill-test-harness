@@ -9,18 +9,20 @@ run.ts                # Full-run orchestrator: reset → build → instrument �
 src/
   instrumentation.ts  # Agent SDK runner — calls the instrumentation agent via @anthropic-ai/claude-agent-sdk
   evaluation.ts       # Honeycomb query-based evaluation criteria
+  weaver.ts           # Finalizes + parses the weaver live-check report (weaver_live_check criterion)
   harness.ts          # Helpers that wrap harness.sh commands
   metrics.ts          # Run record persistence (runs.jsonl) and summary printing
 harness.sh            # Low-level step runner: reset, build, bootstrap, start, stop, traffic, instrument
-broadleaf.sh          # Thin wrapper: ./broadleaf.sh <cmd> → ./harness.sh broadleaf <cmd>
+collector.template.yaml  # Per-run OTel Collector config (fan-out to Honeycomb + weaver live-check)
+otel/                 # Downloaded tooling (gitignored): Java agent, weaver, otelcol-contrib
 apps/
-  broadleaf/          # Broadleaf Commerce DemoSite (Java/Spring Boot)
+  <app>/              # One directory per target app (e.g. broadleaf, realworld-go, beaverhabits)
     config.sh         # App-specific variables and start/stop/build hooks
     traffic.sh        # Traffic generation script
     instrument-preamble.md  # App-specific intro injected into the agent prompt
     EVALUATION.md     # Evaluation checklist for this app
 checkouts/
-  broadleaf/          # Cloned app code (gitignored)
+  <app>/              # Cloned app code (gitignored)
 ```
 
 To add a new app, create `apps/<name>/` with `config.sh`, `traffic.sh`, `instrument-preamble.md`, and `EVALUATION.md`. No changes to shared harness code required.
@@ -42,61 +44,59 @@ npx tsx run.ts all --parallel             # every app under apps/, concurrently
 With more than one app, `run.ts` spawns one isolated child process per app
 (`--parallel` runs them concurrently; otherwise sequentially) and prints a
 combined pass/fail summary. Each app uses app-scoped logs (`logs/<app>/`), PID
-file (`.harness.<app>.pids`), and prompt (`.instrument-prompt.<app>.md`), and a
-distinct default port (broadleaf 8080/8443, realworld-go 8090, beaverhabits 9001)
-so concurrent runs don't collide. Per-app ports are set in `apps/<app>/config.sh`
-via `APP_HTTP_PORT` (broadleaf also `APP_HTTPS_PORT`/`APP_ADMIN_HTTP_PORT`/`APP_ADMIN_HTTPS_PORT`).
+file (`.harness.<app>.pids`), and prompt (`.instrument-prompt.<app>.md`), so
+concurrent runs don't collide. For `--parallel`, each app must bind distinct
+ports — configured per app in `apps/<app>/config.sh` (`APP_HTTP_PORT` and any
+other listener vars the app defines).
+
+During `start`, the harness also brings up a per-run OTel Collector + `weaver registry
+live-check` OTLP receiver (dynamically-allocated ports, app-scoped config/pid/state) and
+points the app's OTLP export at the collector, which fans telemetry out to **both**
+Honeycomb (for the query-based criteria) and weaver (for the `weaver_live_check`
+criterion). Disable with `HARNESS_WEAVER_CAPTURE=0`. Requires `download-tools` to have
+fetched `otel/weaver` + `otel/otelcol-contrib`; if absent the harness falls back to
+exporting straight to Honeycomb and skips the weaver criterion.
 
 This orchestrates the complete cycle automatically:
 
 1. `reset --purge` — discard the current scratch branch and create a fresh `scratch_YYYY-MM-DD` branch from `clean`
 2. `build` — build all modules
-3. `bootstrap` — seed the HSQLDB schema (skipped automatically if already seeded)
+3. `bootstrap` — one-time setup (e.g. seed a database) if the app defines it; skipped automatically if already done
 4. `instrument` — generate `.instrument-prompt.<app>.md` from the skill content + app preamble
 5. Agent SDK run — `src/instrumentation.ts` drives a clean-context agent via `@anthropic-ai/claude-agent-sdk` with the prompt, no conversation history
-6. `start` — start site (HTTP 8080 / HTTPS 8443) and admin (HTTP 8081 / HTTPS 8444); ports configurable via `APP_*_PORT`
+6. `start` — launch the app's server(s) in the background (ports configured in `apps/<app>/config.sh`)
 7. `traffic` — generate representative traffic across key paths
 8. Evaluate — `src/evaluation.ts` queries Honeycomb and checks pass/fail criteria
 9. Record — results appended to `runs.jsonl`
 
-> **Note on bootstrap:** The embedded HSQLDB stores its files under `/tmp/broadleaf-hsqldb`. These survive normal session restarts but are cleared on system reboot. If `start` fails with a schema-related error, run `./broadleaf.sh bootstrap` manually before re-running.
+> **Note on bootstrap:** Some apps persist `bootstrap` state outside the checkout (e.g. a seeded database under `/tmp`), which can survive session restarts but be cleared on system reboot. If `start` fails with a schema/setup error, run `./harness.sh <app> bootstrap` manually before re-running.
 
 ## harness.sh — Individual Steps
 
-`harness.sh` (and the `broadleaf.sh` wrapper) expose each step individually for debugging. `run.ts` calls these internally; you rarely need to invoke them directly. Two env vars are required: `OTEL_EXPORTER_OTLP_HEADERS` (ingest key) and `HONEYCOMB_QUERY_API_KEY` (query key with Query Data permission) — both read from `.env`.
+`harness.sh` exposes each step individually for debugging. `run.ts` calls these internally; you rarely need to invoke them directly. Two env vars are required: `OTEL_EXPORTER_OTLP_HEADERS` (ingest key) and `HONEYCOMB_QUERY_API_KEY` (query key with Query Data permission) — both read from `.env`.
 
-## Key facts (Broadleaf)
+Run any step as `./harness.sh <app> <cmd>`:
 
-- **DemoSite** is a Maven multi-module Spring Boot app (Spring Boot 2.7.x, Java 17+)
-- Modules: `core`, `site` (port 8080), `admin` (port 8081), `api` (port 8082)
-- App code lives at: `checkouts/broadleaf/`
-- Default database: embedded HSQLDB — no external services needed
-- The `clean` branch in the fork (`evanderkoogh/broadleaf-demosite`) is the unmodified upstream baseline; never commit instrumentation changes there
-- Scratch branches (`scratch_YYYY-MM-DD[-N]`) are the working branches for each test run
+- `download` — clone the app repo (skips if already present)
+- `download-agent` — download the OTel agent for the app's language (if it uses one)
+- `download-tools` — download `weaver` + `otelcol-contrib` to `otel/`
+- `build` — build the app
+- `bootstrap` — one-time setup (e.g. seed a database), if the app defines it
+- `instrument` — generate `.instrument-prompt.<app>.md` (used internally by `run.ts`)
+- `start` / `stop` / `restart` / `status` — manage the app's server(s) in the background
+- `traffic` — generate representative traffic against the running app
+- `reset [--purge]` — check out the app's `clean` baseline and create a fresh scratch branch
+- `clean` — remove logs and Playwright session artifacts
 
-## Running the DemoSite (manual steps)
+Each app's checkout has a `clean` branch (the unmodified upstream baseline — never commit instrumentation changes there) and per-run `scratch_YYYY-MM-DD[-N]` working branches.
 
-Use `broadleaf.sh` (or `harness.sh broadleaf`) to run individual steps — never invoke Maven or Java directly:
+## Browsing a running app
 
-- `./broadleaf.sh download` — clone the DemoSite repo (skips if already present)
-- `./broadleaf.sh download-agent` — download the OTel Java agent jar to `otel/`
-- `./broadleaf.sh build` — build all modules (skips tests)
-- `./broadleaf.sh bootstrap` — seed HSQLDB schema (once after build or system reboot)
-- `./broadleaf.sh instrument` — generate `.instrument-prompt.<app>.md` (used internally by `run.ts`)
-- `./broadleaf.sh start` — start site (HTTP 8080 / HTTPS 8443) and admin (HTTP 8081 / HTTPS 8444) in the background
-- `./broadleaf.sh stop` — stop running servers
-- `./broadleaf.sh restart` — stop, clean logs, then start
-- `./broadleaf.sh status` — check whether servers are running
-- `./broadleaf.sh traffic` — generate representative traffic across key site paths
-- `./broadleaf.sh clean` — remove logs and Playwright session artifacts
-
-## Browsing the DemoSite
-
-Use the **Playwright MCP** tools (`playwright_navigate`, `playwright_screenshot`, etc.) when interacting with the running demo. Do not use `curl`, `WebFetch`, or raw HTTP calls to browse or verify UI behavior.
+Use the **Playwright MCP** tools (`playwright_navigate`, `playwright_screenshot`, etc.) when interacting with a running app's UI. Do not use `curl`, `WebFetch`, or raw HTTP calls to browse or verify UI behavior.
 
 ## Constraints
 
-**All OpenTelemetry instrumentation changes must be made inside `checkouts/broadleaf/` only.** The root-level directory and `apps/broadleaf/` config files are the test harness and must never be modified as part of an instrumentation task. If an instrumentation skill tries to create or edit files outside `checkouts/broadleaf/`, that is a mistake.
+**All OpenTelemetry instrumentation changes must be made inside the target app's `checkouts/<app>/` only.** The root-level directory and `apps/<app>/` config files are the test harness and must never be modified as part of an instrumentation task. If an instrumentation skill tries to create or edit files outside `checkouts/<app>/`, that is a mistake.
 
 ## Adding a new app
 
