@@ -70,6 +70,84 @@ async function runQuery(
   throw new Error("Honeycomb query timed out");
 }
 
+// Fetch all column key-names for a dataset. Returns null if the listing fails.
+async function fetchColumns(dataset: string, apiKey: string): Promise<string[] | null> {
+  try {
+    const res = await fetch(`${HONEYCOMB_BASE}/columns/${dataset}`, {
+      headers: {
+        "X-Honeycomb-Team": apiKey,
+        "X-Honeycomb-Environment": HONEYCOMB_ENV,
+      },
+    });
+    if (!res.ok) return null;
+    const cols = (await res.json()) as Array<{ key_name: string }>;
+    return cols.map((c) => c.key_name);
+  } catch {
+    return null;
+  }
+}
+
+// Deprecated OTel semantic-convention attribute names → their current replacement.
+// Modern SDKs/instrumentation emit the right-hand names; presence of a left-hand name
+// means the instrumentation is emitting stale conventions.
+const DEPRECATED_SEMCONV: Record<string, string> = {
+  // HTTP
+  "http.method": "http.request.method",
+  "http.status_code": "http.response.status_code",
+  "http.url": "url.full",
+  "http.target": "url.path",
+  "http.scheme": "url.scheme",
+  "http.host": "server.address",
+  "http.user_agent": "user_agent.original",
+  "http.request_content_length": "http.request.body.size",
+  "http.response_content_length": "http.response.body.size",
+  "http.flavor": "network.protocol.version",
+  // Network
+  "net.peer.name": "server.address",
+  "net.peer.port": "server.port",
+  "net.peer.ip": "network.peer.address",
+  "net.host.name": "server.address",
+  "net.host.port": "server.port",
+  "net.sock.peer.addr": "network.peer.address",
+  "net.sock.peer.port": "network.peer.port",
+  "net.transport": "network.transport",
+  "net.protocol.name": "network.protocol.name",
+  "net.protocol.version": "network.protocol.version",
+  // Database
+  "db.system": "db.system.name",
+  "db.statement": "db.query.text",
+  "db.operation": "db.operation.name",
+  "db.name": "db.namespace",
+  "db.sql.table": "db.collection.name",
+  // Messaging / FaaS / user
+  "messaging.destination": "messaging.destination.name",
+  "messaging.destination_kind": "messaging.operation.type",
+  "faas.execution": "faas.invocation_id",
+  "enduser.id": "user.id",
+};
+
+// Determine the database system value, preferring the current semconv attribute
+// (db.system.name) and falling back to the deprecated one (db.system).
+async function evaluateDbSystem(
+  dataset: string,
+  apiKey: string
+): Promise<{ value: string; column: string } | null> {
+  for (const column of ["db.system.name", "db.system"]) {
+    const rows = await runQueryOrNull(
+      dataset,
+      {
+        calculations: [{ op: "COUNT" }],
+        filters: [{ column, op: "exists" }],
+        breakdowns: [column],
+      },
+      apiKey
+    );
+    const value = rows?.[0]?.[column] as string | undefined;
+    if (value) return { value, column };
+  }
+  return null;
+}
+
 export interface CriterionResult {
   pass: boolean;
   value?: unknown;
@@ -82,13 +160,14 @@ export interface EvaluationResults {
   skill_version: CriterionResult;
   rootless_traces: CriterionResult;
   no_explosion: CriterionResult;
+  current_semconv: CriterionResult;
 }
 
 export async function evaluate(
   dataset: string,
   apiKey: string
 ): Promise<EvaluationResults> {
-  const [spans, httpRoutes, dbSpans, skillVersion, rootless, explosion] =
+  const [spans, httpRoutes, dbResult, skillVersion, rootless, explosion, columns] =
     await Promise.all([
       runQuery(dataset, { calculations: [{ op: "COUNT" }] }, apiKey),
       runQueryOrNull(
@@ -105,15 +184,7 @@ export async function evaluate(
         },
         apiKey
       ),
-      runQueryOrNull(
-        dataset,
-        {
-          calculations: [{ op: "COUNT" }],
-          filters: [{ column: "db.system", op: "exists" }],
-          breakdowns: ["db.system"],
-        },
-        apiKey
-      ),
+      evaluateDbSystem(dataset, apiKey),
       runQueryOrNull(
         dataset,
         {
@@ -146,15 +217,18 @@ export async function evaluate(
         },
         apiKey
       ),
+      fetchColumns(dataset, apiKey),
     ]);
 
   const totalSpans = (spans[0]?.["COUNT"] as number) ?? 0;
   const httpRouteRows = (httpRoutes ?? []).filter(
     (r) => r["http.route"] !== "/*" && r["http.route"] !== "/"
   );
-  const dbSystem = dbSpans?.[0]?.["db.system"] as string | undefined;
   const rootlessCount = (rootless?.[0]?.["COUNT"] as number) ?? 0;
   const topSpanCount = (explosion?.[0]?.["COUNT"] as number) ?? 0;
+  // Deprecated semantic-convention attributes present in the dataset (null if columns unavailable).
+  const deprecatedFound =
+    columns === null ? null : columns.filter((c) => c in DEPRECATED_SEMCONV);
 
   return {
     spans_arriving: { pass: totalSpans > 0, value: totalSpans },
@@ -162,12 +236,26 @@ export async function evaluate(
       pass: httpRoutes !== null && httpRouteRows.length > 0,
       value: httpRoutes === null ? "column absent" : httpRouteRows.map((r) => r["http.route"]),
     },
-    db_spans: { pass: !!dbSystem, value: dbSystem ?? "column absent" },
+    db_spans: {
+      pass: dbResult !== null,
+      value: dbResult
+        ? `${dbResult.value} (${dbResult.column})`
+        : "column absent",
+    },
     skill_version: {
       pass: skillVersion !== null && ((skillVersion[0]?.["COUNT"] as number) ?? 0) > 0,
       value: skillVersion?.[0]?.["service.instrumentation_skill.branch"] ?? "column absent",
     },
     rootless_traces: { pass: rootless !== null && rootlessCount === 0, value: rootlessCount },
     no_explosion: { pass: explosion !== null && topSpanCount < 10_000, value: topSpanCount },
+    current_semconv: {
+      pass: deprecatedFound !== null && deprecatedFound.length === 0,
+      value:
+        deprecatedFound === null
+          ? "columns unavailable"
+          : deprecatedFound.length === 0
+            ? "none"
+            : deprecatedFound.map((c) => `${c} → ${DEPRECATED_SEMCONV[c]}`),
+    },
   };
 }
