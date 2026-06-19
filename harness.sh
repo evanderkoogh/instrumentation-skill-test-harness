@@ -647,6 +647,12 @@ dispatch() {
   # the app starts (start_collector exports the override env this shell passes on).
   if [[ "$func_name" == "start" ]]; then
     start_collector
+    # Simulate an operator opting into the stable HTTP + database semantic conventions
+    # at the deployment level: export it as a real env var before the app process starts.
+    # This is what a real environment would provide, so apps whose launch path the skill
+    # can't edit still get the opt-in honored. (The skill is still expected to communicate
+    # this to users — see the env_var_output criterion.)
+    export OTEL_SEMCONV_STABILITY_OPT_IN="${OTEL_SEMCONV_STABILITY_OPT_IN:-http,database}"
   fi
   if declare -f "cmd_${func_name}" > /dev/null 2>&1; then
     "cmd_${func_name}" "$@"

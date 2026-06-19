@@ -166,9 +166,11 @@ export interface HoneycombCriteria {
 }
 
 // Full criteria set recorded for a run: the Honeycomb criteria plus the local
-// weaver live-check verdict (computed separately in run.ts via src/weaver.ts).
+// criteria computed separately in run.ts — the weaver live-check verdict
+// (src/weaver.ts) and the agent's env-var communication (src/envvars.ts).
 export interface EvaluationResults extends HoneycombCriteria {
   weaver_live_check: CriterionResult;
+  env_var_output: CriterionResult;
 }
 
 export async function evaluate(

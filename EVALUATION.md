@@ -104,6 +104,19 @@ This requires the bundled tooling (`./harness.sh <app> download-tools` fetches
 `otel/weaver` + `otel/otelcol-contrib`); if unavailable the criterion is skipped and the
 app exports straight to Honeycomb (the other criteria are unaffected).
 
+### 9. Environment-variable contract communicated — env_var_output
+
+Not a Honeycomb query. The skill instructs the agent to tell the user which environment
+variables must be set in the runtime environment. The harness captures the agent's final
+summary (`tmp/agent-output.<app>.txt`) and checks it communicated the contract:
+
+- It must always name `OTEL_EXPORTER_OTLP_ENDPOINT` (a real deployment has to point the
+  exporter somewhere, even though the harness injects it during the run).
+- It must also name `OTEL_SEMCONV_STABILITY_OPT_IN` **unless** the agent set it as a real
+  env var in a committed launch script in the checkout (start script, Dockerfile, Procfile,
+  …). Setting it from application code does not count — instrumentation reads the variable
+  once at init, so in-code mutation is unreliable and the user still has to set it at launch.
+
 ## Scoring guide
 
 | Criteria | Weight | Notes |
@@ -113,4 +126,5 @@ app exports straight to Honeycomb (the other criteria are unaffected).
 | 6 (no rootless traces) | Disqualifier | Indicates export or sampling misconfiguration |
 | 7 (no explosion) | Disqualifier | One failure voids quality criteria |
 | 8 (weaver live-check) | High value | Skill must create a registry; telemetry must match it |
+| 9 (env-var contract) | High value | Agent must communicate required env vars to the user |
 | App-specific criteria | High value | See apps/<app>/EVALUATION.md |

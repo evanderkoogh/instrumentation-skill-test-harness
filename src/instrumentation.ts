@@ -1,5 +1,5 @@
 import { query, type HookInput, type HookJSONOutput } from "@anthropic-ai/claude-agent-sdk";
-import { readFileSync } from "fs";
+import { readFileSync, writeFileSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 import { makeFsGuard, denyReason } from "./sandbox.js";
@@ -73,6 +73,9 @@ export async function runInstrumentation(
   let outputTokens = 0;
   let resolvedModel = model ?? "unknown";
   let sessionId = "unknown";
+  // The agent's final summary text — where it communicates the required env-var contract
+  // to the user. Persisted for the env_var_output evaluation criterion.
+  let finalOutput = "";
 
   try {
     for await (const event of query({
@@ -118,24 +121,30 @@ export async function runInstrumentation(
       } else if (event.type === "assistant") {
         const content = event.message.content;
         if (Array.isArray(content)) {
+          let msgText = "";
           for (const block of content) {
-            if (
-              typeof block === "object" &&
-              block !== null &&
-              "type" in block &&
-              (block as { type: string }).type === "tool_use"
-            ) {
+            if (typeof block !== "object" || block === null || !("type" in block)) continue;
+            const type = (block as { type: string }).type;
+            if (type === "tool_use") {
               toolUses++;
               const b = block as { type: string; name: string; input: Record<string, unknown> };
               const detail = toolDetail(b.name, b.input);
               const elapsed = `${((Date.now() - start) / 1000).toFixed(0)}s`;
               console.log(`  [${app}|${resolvedModel}][${elapsed}] ${b.name}${detail}`);
+            } else if (type === "text") {
+              msgText += (block as { type: string; text: string }).text;
             }
           }
+          // Keep the latest non-empty assistant prose as the running "final" message;
+          // the result event below overrides it with the authoritative final text.
+          if (msgText.trim()) finalOutput = msgText;
         }
       } else if (event.type === "result") {
         inputTokens = event.usage?.input_tokens ?? 0;
         outputTokens = event.usage?.output_tokens ?? 0;
+        if (event.subtype === "success" && typeof event.result === "string" && event.result.trim()) {
+          finalOutput = event.result;
+        }
       }
     }
   } catch (err) {
@@ -151,6 +160,9 @@ export async function runInstrumentation(
   if (sandboxDenials > 0) {
     console.log(`  [${app}|sandbox] blocked ${sandboxDenials} out-of-checkout access attempt(s)`);
   }
+
+  // Persist the agent's final summary for the env_var_output criterion (see src/envvars.ts).
+  writeFileSync(resolve(harnessRoot, "tmp", `agent-output.${app}.txt`), finalOutput);
 
   return {
     duration_ms: Date.now() - start,

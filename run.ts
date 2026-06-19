@@ -14,6 +14,7 @@ import {
 import { runInstrumentation } from "./src/instrumentation.js";
 import { evaluate, type EvaluationResults } from "./src/evaluation.js";
 import { runWeaverLiveCheck } from "./src/weaver.js";
+import { evaluateEnvVarOutput } from "./src/envvars.js";
 import { recordRun, printSummary } from "./src/metrics.js";
 import { initTracing, shutdownTracing, getTracer } from "./src/otel.js";
 import { SpanStatusCode } from "@opentelemetry/api";
@@ -225,6 +226,11 @@ async function runApp(app: string): Promise<void> {
                 ? `skipped: ${weaverResult.reason}`
                 : `${weaverResult.violations} violations, ${weaverResult.improvements} improvements (registry: ${weaverResult.registry})`,
             },
+            env_var_output: evaluateEnvVarOutput(
+              app,
+              resolve(__dirname, "checkouts", app),
+              __dirname
+            ),
           };
           for (const [key, val] of Object.entries(merged)) {
             span.setAttribute(`criterion.${key}.pass`, val.pass);
