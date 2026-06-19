@@ -146,7 +146,7 @@ cmd_start() {
   echo "  Admin  -> https://localhost:$APP_ADMIN_HTTPS_PORT/admin  (admin / admin)"
   echo ""
   echo "Logs: $LOG_DIR/"
-  echo "Stop with: ./broadleaf.sh stop"
+  echo "Stop with: ./harness.sh broadleaf stop"
 }
 
 cmd_status() {

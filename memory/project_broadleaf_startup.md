@@ -11,9 +11,9 @@ Broadleaf Commerce DemoSite (Spring Boot 2.7.x, Java 25) has several non-obvious
 
 **Why:** Broadleaf uses Spring Load-Time Weaving (`spring-instrument.jar`) to weave entity fields at class-load time. A standard JVM classpath via `java -cp` is required for this to work correctly.
 
-**How to apply:** Always update `start-site.sh` and `start-admin.sh` in DemoSite/. The `broadleaf.sh` harness calls these scripts.
+**How to apply:** Always update `start-site.sh` and `start-admin.sh` in DemoSite/. The harness (`./harness.sh broadleaf start`) calls these scripts.
 
-**HSQLDB bootstrap:** The embedded HSQLDB stores files at `/tmp/broadleaf-hsqldb`. These persist across normal restarts but are wiped on system reboot. `npx tsx run.ts broadleaf` runs bootstrap automatically; it's a no-op if already seeded. If `start` fails with a schema error, run `./broadleaf.sh bootstrap` manually.
+**HSQLDB bootstrap:** The embedded HSQLDB stores files at `/tmp/broadleaf-hsqldb`. These persist across normal restarts but are wiped on system reboot. `npx tsx run.ts broadleaf` runs bootstrap automatically; it's a no-op if already seeded. If `start` fails with a schema error, run `./harness.sh broadleaf bootstrap` manually.
 
 **Stale Solr:** Solr runs as a child process on port 8983 and stores its index under `/var/folders/.../T/solr-8.11.3/`. If a previous run crashed without a clean shutdown, the next bootstrap will fail with `SolrCore 'catalog_reindex' is not available due to init failure`. Fix: `kill $(lsof -ti :8983)` then `rm -rf /var/folders/sc/*/T/solr-8.11.3/`.
 

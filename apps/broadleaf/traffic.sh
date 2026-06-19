@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Generates representative HTTP traffic against the Broadleaf DemoSite.
-# Called by harness.sh when running: ./broadleaf.sh traffic
+# Called by harness.sh when running: ./harness.sh broadleaf traffic
 set -euo pipefail
 
 PORT="${APP_HTTPS_PORT:-8443}"
 if ! lsof -ti tcp:"$PORT" > /dev/null 2>&1; then
-  echo "Site is not running on port $PORT. Run './broadleaf.sh start' first." >&2
+  echo "Site is not running on port $PORT. Run './harness.sh broadleaf start' first." >&2
   exit 1
 fi
 

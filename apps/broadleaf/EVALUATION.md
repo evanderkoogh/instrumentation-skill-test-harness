@@ -1,6 +1,6 @@
 # Broadleaf-Specific Evaluation Criteria
 
-Run `./broadleaf.sh traffic` first, then check these in Honeycomb against the
+Run `./harness.sh broadleaf traffic` first, then check these in Honeycomb against the
 `broadleaf-site` dataset (last 15 minutes). These supplement the common criteria
 in the root `EVALUATION.md`.
 
