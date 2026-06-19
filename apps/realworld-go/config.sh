@@ -6,7 +6,9 @@ APP_NAME="realworld-go"
 APP_REPO="https://github.com/gothinkster/golang-gin-realworld-example-app.git"
 APP_CLEAN_SHA="626c372d259472148d93303f74aa9b9a1cdcef24"
 APP_CLEAN_BRANCH="main"
-APP_HTTP_PORT=8080
+# 8090 (not 8080) so this can run concurrently with broadleaf, whose site HTTP
+# connector binds 8080. The traffic script and cmd_start both honor APP_HTTP_PORT.
+APP_HTTP_PORT=8090
 APP_OTEL_AGENT_TYPE="go"   # SDK-based; no external agent binary (see harness_download_agent)
 APP_DATASET="realworld-go"
 
@@ -55,9 +57,11 @@ cmd_start() {
     source "$REPO_DIR/.skill-version"
     export OTEL_RESOURCE_ATTRIBUTES="service.instrumentation_skill.branch=${SKILL_BRANCH},service.instrumentation_skill.git_sha=${SKILL_SHA}"
   fi
-  # Deterministic service name -> Honeycomb dataset for evaluation.
-  export OTEL_SERVICE_NAME="$APP_DATASET"
-  # OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_EXPORTER_OTLP_HEADERS are sourced from .env by harness.sh.
+  # NOTE: service.name is intentionally NOT set here. The instrumentation skill is
+  # responsible for hardcoding service.name in the application's OTel Resource so that
+  # spans land in the "$APP_DATASET" dataset. The evaluation verifies this (service_name
+  # criterion). OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_EXPORTER_OTLP_HEADERS are sourced
+  # from .env by harness.sh.
 
   echo "Starting $APP_NAME on port $APP_HTTP_PORT..."
   ( cd "$REPO_DIR" && PORT="$APP_HTTP_PORT" "./$BINARY_NAME" ) > "$LOG_DIR/app.log" 2>&1 &

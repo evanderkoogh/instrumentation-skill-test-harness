@@ -4,9 +4,17 @@
 APP_NAME="broadleaf"
 APP_REPO="https://github.com/BroadleafCommerce/DemoSite.git"
 APP_CLEAN_SHA="8b6741b84048324fb7e618bc4b643762209ce9c3"
-APP_HTTP_PORT=8080
 APP_OTEL_AGENT_TYPE="java"
 APP_DATASET="broadleaf-site"
+
+# Broadleaf runs two Spring Boot apps, each with an HTTP and an HTTPS connector.
+# Override any of these to relocate the app (e.g. to run concurrently with another
+# app on 8080). Traffic targets the site HTTPS port. The start scripts pass these
+# down to the JVM as system properties (-Dhttp.server.port / -Dserver.port).
+APP_HTTP_PORT=8080         # site HTTP connector (http.server.port)
+APP_HTTPS_PORT=8443        # site HTTPS connector (server.port) — traffic target
+APP_ADMIN_HTTP_PORT=8081   # admin HTTP connector
+APP_ADMIN_HTTPS_PORT=8444  # admin HTTPS connector (server.port)
 
 MAVEN_OPTS_VAL="-Xmx1g"
 
@@ -86,12 +94,15 @@ cmd_start() {
     exit 1
   fi
 
-  if port_in_use 8080; then echo "Port 8080 is already in use." >&2; exit 1; fi
-  if port_in_use 8081; then echo "Port 8081 is already in use." >&2; exit 1; fi
+  for p in "$APP_HTTP_PORT" "$APP_HTTPS_PORT" "$APP_ADMIN_HTTP_PORT" "$APP_ADMIN_HTTPS_PORT"; do
+    if port_in_use "$p"; then echo "Port $p is already in use." >&2; exit 1; fi
+  done
 
-  echo "Starting site on port 8080..."
+  echo "Starting site on ports $APP_HTTP_PORT (HTTP) / $APP_HTTPS_PORT (HTTPS)..."
   if [[ -x "$REPO_DIR/start-site.sh" ]]; then
-    MAVEN_OPTS="$MAVEN_OPTS_VAL" "$REPO_DIR/start-site.sh" > "$LOG_DIR/site.log" 2>&1 &
+    MAVEN_OPTS="$MAVEN_OPTS_VAL" \
+      SITE_HTTP_PORT="$APP_HTTP_PORT" SITE_HTTPS_PORT="$APP_HTTPS_PORT" \
+      "$REPO_DIR/start-site.sh" > "$LOG_DIR/site.log" 2>&1 &
   else
     MAVEN_OPTS="$MAVEN_OPTS_VAL" mvn -f "$REPO_DIR/site/pom.xml" spring-boot:run \
       > "$LOG_DIR/site.log" 2>&1 &
@@ -107,9 +118,11 @@ cmd_start() {
     fi
   done
 
-  echo "Starting admin on port 8081..."
+  echo "Starting admin on ports $APP_ADMIN_HTTP_PORT (HTTP) / $APP_ADMIN_HTTPS_PORT (HTTPS)..."
   if [[ -x "$REPO_DIR/start-admin.sh" ]]; then
-    MAVEN_OPTS="$MAVEN_OPTS_VAL" "$REPO_DIR/start-admin.sh" > "$LOG_DIR/admin.log" 2>&1 &
+    MAVEN_OPTS="$MAVEN_OPTS_VAL" \
+      ADMIN_HTTP_PORT="$APP_ADMIN_HTTP_PORT" ADMIN_HTTPS_PORT="$APP_ADMIN_HTTPS_PORT" \
+      "$REPO_DIR/start-admin.sh" > "$LOG_DIR/admin.log" 2>&1 &
   else
     MAVEN_OPTS="$MAVEN_OPTS_VAL" mvn -f "$REPO_DIR/admin/pom.xml" spring-boot:run \
       > "$LOG_DIR/admin.log" 2>&1 &
@@ -129,8 +142,8 @@ cmd_start() {
 
   echo ""
   echo "Servers are up:"
-  echo "  Store  -> http://localhost:8080"
-  echo "  Admin  -> http://localhost:8081/admin  (admin / admin)"
+  echo "  Store  -> https://localhost:$APP_HTTPS_PORT"
+  echo "  Admin  -> https://localhost:$APP_ADMIN_HTTPS_PORT/admin  (admin / admin)"
   echo ""
   echo "Logs: $LOG_DIR/"
   echo "Stop with: ./broadleaf.sh stop"

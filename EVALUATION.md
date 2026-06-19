@@ -13,6 +13,19 @@ COUNT
 Expect: non-zero. If zero, check `OTEL_EXPORTER_OTLP_HEADERS` in `.env` and verify the
 app is configured to export to Honeycomb.
 
+### 1b. service.name is hardcoded correctly
+```
+COUNT
+BREAKDOWN: service.name
+FILTER: service.name exists
+```
+Expect: every span carries a stable, non-default `service.name`. The harness intentionally
+does **not** set `OTEL_SERVICE_NAME`; the instrumentation skill is responsible for setting
+it (derived from build config or the repo/directory name). The criterion is lenient about the
+exact value — it only fails when `service.name` is absent or left at the OTel default
+(`unknown_service`, optionally language-suffixed such as `unknown_service:go`), which means
+it was never set.
+
 ### 2. HTTP handler spans exist
 ```
 COUNT
@@ -77,7 +90,7 @@ added spans in a loop or on a trivial helper. Flag this as an anti-pattern.
 
 | Criteria | Weight | Notes |
 | --- | --- | --- |
-| 1–4 (minimum) | Required | Fail = instrumentation broken, not just incomplete |
+| 1–4 + 1b (minimum) | Required | Fail = instrumentation broken, not just incomplete |
 | 5 (trace completeness) | High value | Confirms context propagation works |
 | 6 (no rootless traces) | Disqualifier | Indicates export or sampling misconfiguration |
 | 7 (no explosion) | Disqualifier | One failure voids quality criteria |

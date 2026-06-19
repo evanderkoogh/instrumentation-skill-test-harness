@@ -155,6 +155,7 @@ export interface CriterionResult {
 
 export interface EvaluationResults {
   spans_arriving: CriterionResult;
+  service_name: CriterionResult;
   http_routes: CriterionResult;
   db_spans: CriterionResult;
   skill_version: CriterionResult;
@@ -167,9 +168,20 @@ export async function evaluate(
   dataset: string,
   apiKey: string
 ): Promise<EvaluationResults> {
-  const [spans, httpRoutes, dbResult, skillVersion, rootless, explosion, columns] =
+  const [spans, serviceNames, httpRoutes, dbResult, skillVersion, rootless, explosion, columns] =
     await Promise.all([
       runQuery(dataset, { calculations: [{ op: "COUNT" }] }, apiKey),
+      runQueryOrNull(
+        dataset,
+        {
+          calculations: [{ op: "COUNT" }],
+          filters: [{ column: "service.name", op: "exists" }],
+          breakdowns: ["service.name"],
+          orders: [{ op: "COUNT", order: "descending" }],
+          limit: 10,
+        },
+        apiKey
+      ),
       runQueryOrNull(
         dataset,
         {
@@ -221,6 +233,17 @@ export async function evaluate(
     ]);
 
   const totalSpans = (spans[0]?.["COUNT"] as number) ?? 0;
+  // service.name is set by the instrumentation (the harness no longer sets
+  // OTEL_SERVICE_NAME). The skill derives the name from build config or the repo/dir
+  // name, so we don't require an exact value — only that every span carries a stable,
+  // non-default name. The OTel default ("unknown_service", optionally suffixed with the
+  // language, e.g. "unknown_service:go") means service.name was never set.
+  const serviceNameValues = (serviceNames ?? []).map((r) => r["service.name"] as string);
+  const isDefaultServiceName = (v: string) => !v || v.startsWith("unknown_service");
+  const serviceNameOk =
+    serviceNames !== null &&
+    serviceNameValues.length > 0 &&
+    serviceNameValues.every((v) => !isDefaultServiceName(v));
   const httpRouteRows = (httpRoutes ?? []).filter(
     (r) => r["http.route"] !== "/*" && r["http.route"] !== "/"
   );
@@ -232,6 +255,15 @@ export async function evaluate(
 
   return {
     spans_arriving: { pass: totalSpans > 0, value: totalSpans },
+    service_name: {
+      pass: serviceNameOk,
+      value:
+        serviceNames === null
+          ? "column absent"
+          : serviceNameValues.length === 0
+            ? "no service.name"
+            : serviceNameValues,
+    },
     http_routes: {
       pass: httpRoutes !== null && httpRouteRows.length > 0,
       value: httpRoutes === null ? "column absent" : httpRouteRows.map((r) => r["http.route"]),
