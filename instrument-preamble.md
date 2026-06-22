@@ -6,4 +6,4 @@ CONSTRAINT: All changes must be made inside %REPO_DIR% only.
 OTEL_EXPORTER_OTLP_ENDPOINT=%OTLP_ENDPOINT%
 OTEL_EXPORTER_OTLP_HEADERS=x-honeycomb-team=%API_KEY%
 
-IMPORTANT: Do not start the application, generate traffic, or verify that spans are arriving in Honeycomb. The test harness will handle all of that after you finish. Your job is solely to apply the instrumentation changes.
+IMPORTANT: You SHOULD start the application and drive local traffic to verify your instrumentation — capture the emitted spans with a console/file exporter (e.g. `OTEL_TRACES_EXPORTER=console`) and inspect them directly. Do NOT rely on Honeycomb for verification and do NOT depend on spans arriving there: the test harness runs the authoritative Honeycomb evaluation (its own traffic + queries) after you finish, so leave that to it. Clean up anything you start (stop the app, remove or gate any temporary console/file exporter) before finishing, and do not commit changes that only export to the console.
