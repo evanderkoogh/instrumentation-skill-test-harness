@@ -13,6 +13,26 @@ interface HoneycombResult {
   data: Record<string, unknown>;
 }
 
+// Honeycomb's query endpoints are rate-limited (≈10 requests / 60s). Under `run.ts --parallel`
+// several apps evaluate at once, each firing many criteria queries, so bursts blow past the
+// limit and the endpoint returns 429. Retry those with backoff (honoring Retry-After when
+// present) so a transient rate-limit doesn't fail an otherwise-passing run. Non-429 responses
+// are returned as-is for the caller to handle.
+async function hcFetch(url: string, init: RequestInit, attempts = 6): Promise<Response> {
+  let lastDelayMs = 2000;
+  for (let i = 0; ; i++) {
+    const res = await fetch(url, init);
+    if (res.status !== 429 || i >= attempts) return res;
+    // Prefer the server's Retry-After (seconds); otherwise exponential backoff capped at 60s.
+    const retryAfter = Number(res.headers.get("retry-after"));
+    const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
+      ? retryAfter * 1000
+      : Math.min(lastDelayMs, 60000);
+    lastDelayMs = Math.min(lastDelayMs * 2, 60000);
+    await new Promise((r) => setTimeout(r, waitMs));
+  }
+}
+
 async function runQueryOrNull(
   dataset: string,
   spec: QuerySpec,
@@ -48,7 +68,7 @@ async function runQuery(
     : spec;
 
   // Step 1: save query definition — spec goes directly (no wrapper), time_range is integer seconds
-  const createRes = await fetch(`${HONEYCOMB_BASE}/queries/${dataset}`, {
+  const createRes = await hcFetch(`${HONEYCOMB_BASE}/queries/${dataset}`, {
     method: "POST",
     headers,
     body: JSON.stringify({ ...scoped, time_range: timeRangeSecs }),
@@ -57,7 +77,7 @@ async function runQuery(
   const { id: queryId } = (await createRes.json()) as { id: string };
 
   // Step 2: start a query run
-  const runRes = await fetch(`${HONEYCOMB_BASE}/query_results/${dataset}`, {
+  const runRes = await hcFetch(`${HONEYCOMB_BASE}/query_results/${dataset}`, {
     method: "POST",
     headers,
     body: JSON.stringify({ query_id: queryId, disable_series: false }),
@@ -68,7 +88,7 @@ async function runQuery(
   // Step 3: poll for completion
   for (let i = 0; i < 30; i++) {
     await new Promise((r) => setTimeout(r, 1000));
-    const res = await fetch(`${HONEYCOMB_BASE}/query_results/${dataset}/${resultId}`, { headers });
+    const res = await hcFetch(`${HONEYCOMB_BASE}/query_results/${dataset}/${resultId}`, { headers });
     if (!res.ok) throw new Error(`Query poll failed: ${res.status}`);
     const data = (await res.json()) as {
       complete: boolean;
@@ -82,7 +102,7 @@ async function runQuery(
 // Fetch all column key-names for a dataset. Returns null if the listing fails.
 async function fetchColumns(dataset: string, apiKey: string): Promise<string[] | null> {
   try {
-    const res = await fetch(`${HONEYCOMB_BASE}/columns/${dataset}`, {
+    const res = await hcFetch(`${HONEYCOMB_BASE}/columns/${dataset}`, {
       headers: {
         "X-Honeycomb-Team": apiKey,
         "X-Honeycomb-Environment": HONEYCOMB_ENV,
