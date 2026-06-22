@@ -6,4 +6,9 @@ CONSTRAINT: All changes must be made inside %REPO_DIR% only.
 OTEL_EXPORTER_OTLP_ENDPOINT=%OTLP_ENDPOINT%
 OTEL_EXPORTER_OTLP_HEADERS=x-honeycomb-team=%API_KEY%
 
-IMPORTANT: You SHOULD start the application and drive local traffic to verify your instrumentation — capture the emitted spans with a console/file exporter (e.g. `OTEL_TRACES_EXPORTER=console`) and inspect them directly. Do NOT rely on Honeycomb for verification and do NOT depend on spans arriving there: the test harness runs the authoritative Honeycomb evaluation (its own traffic + queries) after you finish, so leave that to it. Clean up anything you start (stop the app, remove or gate any temporary console/file exporter) before finishing, and do not commit changes that only export to the console.
+IMPORTANT — verify your instrumentation locally before finishing (do not just confirm the app starts):
+
+- **Start the app yourself** to verify. It must bind these ports (the same ones the harness uses, so your run matches the evaluation): %VERIFY_PORTS%. Suggested start: %START_HINT%
+- **Drive real traffic.** A copy of the representative-traffic script is in your checkout at `./%TRAFFIC_SCRIPT%` — run it (it honors `APP_HTTP_PORT`/`APP_HTTPS_PORT`; export them to the ports above), or hit the app's real routes directly. Importing or merely starting the app is NOT verification.
+- **Capture spans with a console/file exporter** (e.g. `OTEL_TRACES_EXPORTER=console`) and inspect them directly. Do NOT rely on Honeycomb or depend on spans arriving there — the test harness runs the authoritative Honeycomb evaluation (its own traffic + queries) after you finish.
+- **Clean up:** stop anything you started and remove or gate any temporary console/file exporter before finishing; do not commit changes that only export to the console.

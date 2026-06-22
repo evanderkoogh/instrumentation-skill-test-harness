@@ -5,7 +5,7 @@
 # Called by harness.sh when running: ./harness.sh realworld-go traffic
 set -euo pipefail
 
-PORT="${APP_HTTP_PORT:-8080}"
+PORT="${APP_HTTP_PORT:-8090}"  # registry default; never 8080 (broadleaf's site port)
 base="http://localhost:$PORT/api"
 
 if ! curl -fsS "$base/ping/" > /dev/null 2>&1; then

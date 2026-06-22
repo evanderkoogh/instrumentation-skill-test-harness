@@ -8,11 +8,13 @@ APP_CLEAN_SHA="626c372d259472148d93303f74aa9b9a1cdcef24"
 APP_CLEAN_BRANCH="main"
 # 8090 (not 8080) so this can run concurrently with broadleaf, whose site HTTP
 # connector binds 8080. The traffic script and cmd_start both honor APP_HTTP_PORT.
-APP_HTTP_PORT=8090
+APP_HTTP_PORT="$REALWORLDGO_HTTP_PORT"  # from the central registry (ports.sh)
 APP_OTEL_AGENT_TYPE="go"   # SDK-based; no external agent binary (see harness_download_agent)
 APP_DATASET="realworld-go"
 
 BINARY_NAME="conduit"
+# How to start the app for LOCAL verification (surfaced to the agent via the prompt).
+APP_START_HINT="from the repo root: build with 'go build -o $BINARY_NAME .', then run 'PORT=$APP_HTTP_PORT ./$BINARY_NAME'"
 
 cmd_build() {
   if [[ ! -d "$REPO_DIR" ]]; then

@@ -4,9 +4,11 @@
 APP_NAME="beaverhabits"
 APP_REPO="https://github.com/daya0576/beaverhabits.git"
 APP_CLEAN_SHA="a4e860e6a66ed8482a8b51829cfb87be69ad0baa"
-APP_HTTP_PORT=9001
+APP_HTTP_PORT="$BEAVERHABITS_HTTP_PORT"  # from the central registry (ports.sh)
 APP_OTEL_AGENT_TYPE="python"
 APP_DATASET="beaverhabits"
+# How to start the app for LOCAL verification (surfaced to the agent via the prompt).
+APP_START_HINT="from the repo root: HABITS_STORAGE=USER_DISK NICEGUI_STORAGE_SECRET=test TRUSTED_LOCAL_EMAIL=test@example.com uv run uvicorn beaverhabits.main:app --port $APP_HTTP_PORT --host 0.0.0.0"
 
 cmd_build() {
   if [[ ! -d "$REPO_DIR" ]]; then
@@ -78,7 +80,7 @@ cmd_start() {
     OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-https://api.honeycomb.io}" \
     OTEL_EXPORTER_OTLP_HEADERS="${OTEL_EXPORTER_OTLP_HEADERS:-}" \
     OTEL_RESOURCE_ATTRIBUTES="$otel_resource_attrs" \
-    uv run uvicorn beaverhabits.main:app --workers 1 --port 9001 --host 0.0.0.0
+    uv run uvicorn beaverhabits.main:app --workers 1 --port "$APP_HTTP_PORT" --host 0.0.0.0
   ) > "$LOG_DIR/beaverhabits.log" 2>&1 &
   local pid=$!
   echo "$pid" > "$PID_FILE"

@@ -3,12 +3,14 @@
 # Uses /demo routes which require no authentication.
 set -euo pipefail
 
-if ! lsof -ti tcp:9001 > /dev/null 2>&1; then
-  echo "Server is not running on port 9001. Run './harness.sh beaverhabits start' first." >&2
+# Port is exported by harness.sh (harness_traffic); falls back to the registry default.
+PORT="${APP_HTTP_PORT:-9101}"
+if ! lsof -ti tcp:"$PORT" > /dev/null 2>&1; then
+  echo "Server is not running on port $PORT. Run './harness.sh beaverhabits start' first." >&2
   exit 1
 fi
 
-base="http://localhost:9001"
+base="http://localhost:$PORT"
 paths=(
   "/demo"
   "/demo/add"

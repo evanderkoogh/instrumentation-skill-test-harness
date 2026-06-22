@@ -110,8 +110,9 @@ This is enforced — not just documented — by a hard sandbox on the instrument
 ## Adding a new app
 
 1. `mkdir apps/<name>`
-2. Create `apps/<name>/config.sh` — set `APP_NAME`, `APP_REPO`, `APP_CLEAN_SHA` (a commit SHA from the upstream repo; no fork required), `APP_OTEL_AGENT_TYPE`, and define `cmd_build()`, `cmd_start()` (and optionally `cmd_bootstrap()`, `cmd_status()`)
-3. Create `apps/<name>/traffic.sh` — standalone script that generates traffic against the running app
-4. Create `apps/<name>/instrument-preamble.md` — app-specific intro injected before the skill content; use `%REPO_DIR%`, `%API_KEY%`, `%OTLP_ENDPOINT%`, `%APP_DATASET%` as substitution placeholders
-5. Create `apps/<name>/EVALUATION.md` — evaluation checklist for verifying instrumentation quality
-6. Run `./harness.sh <name> download` to clone the repo
+2. **Claim ports in `ports.sh`** (the central registry) — add the app to `registered_apps()` and `app_ports()`, and define a var for **every** port it binds, including *implicit* ones the framework opens (embedded DBs, admin connectors, etc. — e.g. Broadleaf's HSQLDB on 9001). Ports must be globally disjoint; run `./harness.sh <name> ports` to verify no collisions. The harness kills processes on these ports before each `start`, so they must be accurate.
+3. Create `apps/<name>/config.sh` — set `APP_NAME`, `APP_REPO`, `APP_CLEAN_SHA` (a commit SHA from the upstream repo; no fork required), `APP_OTEL_AGENT_TYPE`, reference the registry port vars (e.g. `APP_HTTP_PORT="$<NAME>_HTTP_PORT"`), and define `cmd_build()`, `cmd_start()` (and optionally `cmd_bootstrap()`, `cmd_status()`)
+4. Create `apps/<name>/traffic.sh` — standalone script that generates traffic against the running app (use `${APP_HTTP_PORT}` etc., never hardcode ports)
+5. Create `apps/<name>/instrument-preamble.md` — app-specific intro injected before the skill content; use `%REPO_DIR%`, `%API_KEY%`, `%OTLP_ENDPOINT%`, `%APP_DATASET%` as substitution placeholders
+6. Create `apps/<name>/EVALUATION.md` — evaluation checklist for verifying instrumentation quality
+7. Run `./harness.sh <name> download` to clone the repo

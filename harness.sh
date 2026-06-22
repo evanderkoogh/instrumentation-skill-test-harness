@@ -6,7 +6,7 @@ APPS_DIR="$SCRIPT_DIR/apps"
 CHECKOUTS_DIR="$SCRIPT_DIR/checkouts"
 
 usage() {
-  echo "Usage: $(basename "$0") <app> {download|download-agent|download-tools|build|bootstrap|start|stop|restart|status|reset [--purge]|clean|traffic|instrument}"
+  echo "Usage: $(basename "$0") <app> {download|download-agent|download-tools|build|bootstrap|start|stop|restart|status|reset [--purge]|clean|traffic|instrument|ports}"
   echo ""
   echo "  <app>            App profile name (directory under apps/)"
   echo ""
@@ -58,6 +58,14 @@ if [[ -f "$SCRIPT_DIR/.env" ]]; then
   set -a; source "$SCRIPT_DIR/.env"; set +a
 fi
 
+# Load the central port registry (defines per-app port vars, app_ports(), ports_check()).
+# config.sh files reference these vars so all ports live in one place; run `./harness.sh
+# <anyapp> ports` to verify there are no collisions.
+if [[ -f "$SCRIPT_DIR/ports.sh" ]]; then
+  # shellcheck disable=SC1091
+  source "$SCRIPT_DIR/ports.sh"
+fi
+
 # Load app config (defines APP_* variables and optional cmd_* function overrides)
 if [[ ! -f "$APP_DIR/config.sh" ]]; then
   echo "App '$APP' not found. Expected config at: $APP_DIR/config.sh" >&2
@@ -71,6 +79,33 @@ source "$APP_DIR/config.sh"
 
 port_in_use() {
   lsof -ti tcp:"$1" > /dev/null 2>&1
+}
+
+# Kill anything bound to the given ports — leftovers from a prior run or from an agent's
+# own verification (which now starts the app). Safe to call before `start` because ports.sh
+# keeps each app's ports disjoint from every other app's, so we only ever kill our own.
+clear_ports() {
+  local p pids
+  for p in "$@"; do
+    pids=$(lsof -ti tcp:"$p" 2>/dev/null || true)
+    if [[ -n "$pids" ]]; then
+      echo "Clearing port $p (killing PIDs: $(echo "$pids" | tr '\n' ' '))"
+      kill $pids 2>/dev/null || true
+      sleep 1
+      pids=$(lsof -ti tcp:"$p" 2>/dev/null || true)
+      [[ -n "$pids" ]] && kill -9 $pids 2>/dev/null || true
+    fi
+  done
+}
+
+# `ports` command — print the registry map and verify no collisions.
+harness_ports() {
+  if declare -f ports_check > /dev/null 2>&1; then
+    ports_check
+  else
+    echo "ports.sh not loaded — no registry available." >&2
+    exit 1
+  fi
 }
 
 # Pick a currently-unused TCP port in the ephemeral-ish range. Randomized start so
@@ -597,7 +632,25 @@ harness_instrument() {
   skill_branch=$(git -C "$skill_git_root" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
   skill_sha=$(git -C "$skill_git_root" rev-parse --short HEAD 2>/dev/null || echo "unknown")
 
-  local subst=(-e "s|%REPO_DIR%|$REPO_DIR|g" -e "s|%API_KEY%|$api_key|g" -e "s|%OTLP_ENDPOINT%|$otlp_endpoint|g" -e "s|%APP_DATASET%|${APP_DATASET:-}|g")
+  # Make the representative-traffic script the agent can't otherwise see (it lives outside
+  # the sandbox in apps/<app>/) available INSIDE the checkout so the agent's own verification
+  # can drive the exact same traffic the harness uses, instead of inventing its own.
+  local verify_traffic_rel=".harness-verify-traffic.sh"
+  if [[ -f "$APP_DIR/traffic.sh" ]]; then
+    cp "$APP_DIR/traffic.sh" "$REPO_DIR/$verify_traffic_rel" 2>/dev/null || true
+  fi
+  # Ports this app must bind (from the registry) + how to start it, surfaced to the agent so
+  # its verification uses the right ports/start instead of guessing.
+  local verify_ports="(none registered)"
+  if declare -f app_ports > /dev/null 2>&1; then
+    verify_ports="$(app_ports "$APP")"
+    [[ -z "$verify_ports" ]] && verify_ports="(none registered)"
+  fi
+  local start_hint="${APP_START_HINT:-see the run and start scripts in the checkout}"
+  # Escape characters special to a sed replacement (\, &, |) so hints can't corrupt the render.
+  start_hint=$(printf '%s' "$start_hint" | sed -e 's/[\\&|]/\\&/g')
+
+  local subst=(-e "s|%REPO_DIR%|$REPO_DIR|g" -e "s|%API_KEY%|$api_key|g" -e "s|%OTLP_ENDPOINT%|$otlp_endpoint|g" -e "s|%APP_DATASET%|${APP_DATASET:-}|g" -e "s|%VERIFY_PORTS%|$verify_ports|g" -e "s|%START_HINT%|$start_hint|g" -e "s|%TRAFFIC_SCRIPT%|$verify_traffic_rel|g")
 
   local app_preamble=""
   if [[ -f "$APP_DIR/instrument-preamble.md" ]]; then
@@ -651,6 +704,12 @@ dispatch() {
   # Bring up the weaver-capture collector and redirect the app's OTLP export before
   # the app starts (start_collector exports the override env this shell passes on).
   if [[ "$func_name" == "start" ]]; then
+    # Clear any leftover processes on this app's registered ports (prior run, or the agent's
+    # own verification) so we always start from a clean slate. No-op if the app isn't in the
+    # registry. Disjoint ports (ports.sh) guarantee this never touches a peer app in --parallel.
+    if declare -f app_ports > /dev/null 2>&1; then
+      clear_ports $(app_ports "$APP")
+    fi
     start_collector
     # Simulate an operator opting into the stable HTTP + database semantic conventions
     # at the deployment level: export it as a real env var before the app process starts.

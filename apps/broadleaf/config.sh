@@ -11,10 +11,15 @@ APP_DATASET="broadleaf-site"
 # Override any of these to relocate the app (e.g. to run concurrently with another
 # app on 8080). Traffic targets the site HTTPS port. The start scripts pass these
 # down to the JVM as system properties (-Dhttp.server.port / -Dserver.port).
-APP_HTTP_PORT=8080         # site HTTP connector (http.server.port)
-APP_HTTPS_PORT=8443        # site HTTPS connector (server.port) — traffic target
-APP_ADMIN_HTTP_PORT=8081   # admin HTTP connector
-APP_ADMIN_HTTPS_PORT=8444  # admin HTTPS connector (server.port)
+# Ports come from the central registry (ports.sh), sourced by harness.sh.
+APP_HTTP_PORT="$BROADLEAF_HTTP_PORT"          # site HTTP connector (http.server.port)
+APP_HTTPS_PORT="$BROADLEAF_HTTPS_PORT"        # site HTTPS connector (server.port) — traffic target
+APP_ADMIN_HTTP_PORT="$BROADLEAF_ADMIN_HTTP_PORT"   # admin HTTP connector
+APP_ADMIN_HTTPS_PORT="$BROADLEAF_ADMIN_HTTPS_PORT" # admin HTTPS connector (server.port)
+APP_HSQLDB_PORT="$BROADLEAF_HSQLDB_PORT"      # embedded HSQLDB (implicit Broadleaf default)
+# How to start the site for LOCAL verification (surfaced to the agent via the prompt). Uses the
+# in-checkout start-site.sh; also opens HSQLDB on $APP_HSQLDB_PORT and needs the seeded DB.
+APP_START_HINT="from the repo root: SITE_HTTP_PORT=$APP_HTTP_PORT SITE_HTTPS_PORT=$APP_HTTPS_PORT ./start-site.sh"
 
 MAVEN_OPTS_VAL="-Xmx1g"
 
@@ -94,7 +99,7 @@ cmd_start() {
     exit 1
   fi
 
-  for p in "$APP_HTTP_PORT" "$APP_HTTPS_PORT" "$APP_ADMIN_HTTP_PORT" "$APP_ADMIN_HTTPS_PORT"; do
+  for p in "$APP_HTTP_PORT" "$APP_HTTPS_PORT" "$APP_ADMIN_HTTP_PORT" "$APP_ADMIN_HTTPS_PORT" "$APP_HSQLDB_PORT"; do
     if port_in_use "$p"; then echo "Port $p is already in use." >&2; exit 1; fi
   done
 
