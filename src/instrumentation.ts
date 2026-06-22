@@ -15,6 +15,9 @@ function toolDetail(name: string, input: Record<string, unknown>): string {
     case "Edit":    return ` ${clean(input.file_path)}`;
     // Bash commands can be arbitrarily long; keep these capped.
     case "Bash":    return `  ${trunc(input.command, 120)}`;
+    // Sub-agent spawn (verification hand-off) — surface which agent + the task.
+    case "Agent":
+    case "Task":    return ` [${clean(input.subagent_type ?? "?")}] ${trunc(input.description ?? input.prompt, 80)}`;
     default:        return "";
   }
 }
@@ -81,7 +84,15 @@ export async function runInstrumentation(
     for await (const event of query({
       prompt,
       options: {
-        allowedTools: ["Read", "Write", "Edit", "Bash"],
+        // Provide the same capabilities a real Claude Code install has, then let the SKILLS
+        // and shipped AGENTS drive the work. "Agent"/"Task" so the agent can spawn sub-agents;
+        // `skills: all` to enable discovery; `plugins` loads the honeycomb plugin from the LIVE
+        // repo (not the stale version-pinned cache) so the current skills + agents — including
+        // otel-verification and the orchestrator agents — are discoverable. The harness defines
+        // nothing itself; everything it exercises is shipped in the plugin.
+        allowedTools: ["Read", "Write", "Edit", "Bash", "Agent", "Task"],
+        skills: "all",
+        plugins: [{ type: "local", path: resolve(harnessRoot, "agent-skill", "honeycomb") }],
         cwd: repoDir,
         maxTurns: 150,
         hooks: {
@@ -119,6 +130,12 @@ export async function runInstrumentation(
         resolvedModel = event.model;
         sessionId = event.session_id;
       } else if (event.type === "assistant") {
+        // Which agent produced this message: the main thread ("main") or a sub-agent
+        // (e.g. otel-instrumenter / otel-verifier / Explore). subagent_type is the readable
+        // identity; strip the plugin prefix for brevity. Lets us tell conductor vs sub-agent
+        // tool calls apart in the stream.
+        const rawAgent = (event as { subagent_type?: string }).subagent_type;
+        const agent = rawAgent ? rawAgent.replace(/^.*:/, "") : "main";
         const content = event.message.content;
         if (Array.isArray(content)) {
           let msgText = "";
@@ -130,7 +147,7 @@ export async function runInstrumentation(
               const b = block as { type: string; name: string; input: Record<string, unknown> };
               const detail = toolDetail(b.name, b.input);
               const elapsed = `${((Date.now() - start) / 1000).toFixed(0)}s`;
-              console.log(`  [${app}|${resolvedModel}][${elapsed}] ${b.name}${detail}`);
+              console.log(`  [${app}|${agent}][${elapsed}] ${b.name}${detail}`);
             } else if (type === "text") {
               msgText += (block as { type: string; text: string }).text;
             }
