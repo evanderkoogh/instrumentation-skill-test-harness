@@ -277,6 +277,15 @@ async function runApp(app: string): Promise<void> {
       harness(app, "stop");
     } catch (err) {
       rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
+      // Tear down the app's servers + capture collector so a mid-run failure (e.g. an
+      // evaluation/query error after the app is already started) doesn't leak processes that
+      // keep holding this app's ports and break the next run's bootstrap/start. Best-effort:
+      // a cleanup failure must never mask the original error.
+      try {
+        harness(app, "stop");
+      } catch {
+        // ignore — propagate the original failure below
+      }
       throw err;
     } finally {
       rootSpan.end();

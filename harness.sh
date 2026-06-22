@@ -731,13 +731,18 @@ dispatch() {
   local func_name="${cmd//-/_}"
   # Bring up the weaver-capture collector and redirect the app's OTLP export before
   # the app starts (start_collector exports the override env this shell passes on).
-  if [[ "$func_name" == "start" ]]; then
-    # Clear any leftover processes on this app's registered ports (prior run, or the agent's
-    # own verification) so we always start from a clean slate. No-op if the app isn't in the
-    # registry. Disjoint ports (ports.sh) guarantee this never touches a peer app in --parallel.
+  # Clear any leftover processes on this app's registered ports before any step that boots
+  # the real app — `bootstrap` seeds the DB by launching it, `start` runs it for real. A
+  # process leaked by a prior/failed run (or by the agent's own verification) would otherwise
+  # hold a port and fail the boot (e.g. "Port 8443 was already in use"). No-op if the app
+  # isn't in the registry; disjoint ports (ports.sh) guarantee we never touch a peer app
+  # under --parallel.
+  if [[ "$func_name" == "start" || "$func_name" == "bootstrap" ]]; then
     if declare -f app_ports > /dev/null 2>&1; then
       clear_ports $(app_ports "$APP")
     fi
+  fi
+  if [[ "$func_name" == "start" ]]; then
     start_collector
     # Simulate an operator opting into the stable HTTP + database semantic conventions
     # at the deployment level: export it as a real env var before the app process starts.
