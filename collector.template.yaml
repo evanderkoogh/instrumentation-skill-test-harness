@@ -20,6 +20,16 @@ receivers:
       http:
         endpoint: 127.0.0.1:%COLLECTOR_HTTP_PORT%
 
+processors:
+  # Stamp every span/metric/log with this run's id so the evaluation can scope its queries
+  # to the current run only. The Honeycomb dataset is shared across runs and its column
+  # schema persists, so without this the eval picks up stale spans/columns from prior runs.
+  resource/run_id:
+    attributes:
+      - key: harness.run_id
+        value: "%RUN_ID%"
+        action: upsert
+
 exporters:
   otlphttp/honeycomb:
     endpoint: %HONEYCOMB_ENDPOINT%
@@ -38,10 +48,13 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
+      processors: [resource/run_id]
       exporters: [otlphttp/honeycomb, otlp/weaver]
     metrics:
       receivers: [otlp]
+      processors: [resource/run_id]
       exporters: [otlphttp/honeycomb, otlp/weaver]
     logs:
       receivers: [otlp]
+      processors: [resource/run_id]
       exporters: [otlphttp/honeycomb, otlp/weaver]

@@ -17,10 +17,11 @@ async function runQueryOrNull(
   dataset: string,
   spec: QuerySpec,
   apiKey: string,
+  runId?: string,
   timeRangeSecs = 900
 ): Promise<Record<string, unknown>[] | null> {
   try {
-    return await runQuery(dataset, spec, apiKey, timeRangeSecs);
+    return await runQuery(dataset, spec, apiKey, runId, timeRangeSecs);
   } catch {
     return null;  // column doesn't exist or other query error → criterion fails
   }
@@ -30,6 +31,7 @@ async function runQuery(
   dataset: string,
   spec: QuerySpec,
   apiKey: string,
+  runId?: string,
   timeRangeSecs = 900  // 15 minutes in seconds
 ): Promise<Record<string, unknown>[]> {
   const headers = {
@@ -38,11 +40,18 @@ async function runQuery(
     "Content-Type": "application/json",
   };
 
+  // Scope to this run only — the dataset is shared across runs, so without this filter a
+  // query would pick up spans (and persistent columns) from prior runs. harness.run_id is
+  // stamped on every span by the per-run collector (collector.template.yaml).
+  const scoped: QuerySpec = runId
+    ? { ...spec, filters: [...(spec.filters ?? []), { column: "harness.run_id", op: "=", value: runId }] }
+    : spec;
+
   // Step 1: save query definition — spec goes directly (no wrapper), time_range is integer seconds
   const createRes = await fetch(`${HONEYCOMB_BASE}/queries/${dataset}`, {
     method: "POST",
     headers,
-    body: JSON.stringify({ ...spec, time_range: timeRangeSecs }),
+    body: JSON.stringify({ ...scoped, time_range: timeRangeSecs }),
   });
   if (!createRes.ok) throw new Error(`Query create failed: ${createRes.status} ${await createRes.text()}`);
   const { id: queryId } = (await createRes.json()) as { id: string };
@@ -130,7 +139,8 @@ const DEPRECATED_SEMCONV: Record<string, string> = {
 // (db.system.name) and falling back to the deprecated one (db.system).
 async function evaluateDbSystem(
   dataset: string,
-  apiKey: string
+  apiKey: string,
+  runId?: string
 ): Promise<{ value: string; column: string } | null> {
   for (const column of ["db.system.name", "db.system"]) {
     const rows = await runQueryOrNull(
@@ -140,7 +150,8 @@ async function evaluateDbSystem(
         filters: [{ column, op: "exists" }],
         breakdowns: [column],
       },
-      apiKey
+      apiKey,
+      runId
     );
     const value = rows?.[0]?.[column] as string | undefined;
     if (value) return { value, column };
@@ -175,11 +186,12 @@ export interface EvaluationResults extends HoneycombCriteria {
 
 export async function evaluate(
   dataset: string,
-  apiKey: string
+  apiKey: string,
+  runId?: string
 ): Promise<HoneycombCriteria> {
   const [spans, serviceNames, httpRoutes, dbResult, skillVersion, rootless, explosion, columns] =
     await Promise.all([
-      runQuery(dataset, { calculations: [{ op: "COUNT" }] }, apiKey),
+      runQuery(dataset, { calculations: [{ op: "COUNT" }] }, apiKey, runId),
       runQueryOrNull(
         dataset,
         {
@@ -189,7 +201,8 @@ export async function evaluate(
           orders: [{ op: "COUNT", order: "descending" }],
           limit: 10,
         },
-        apiKey
+        apiKey,
+        runId
       ),
       runQueryOrNull(
         dataset,
@@ -203,9 +216,10 @@ export async function evaluate(
           orders: [{ op: "COUNT", order: "descending" }],
           limit: 10,
         },
-        apiKey
+        apiKey,
+        runId
       ),
-      evaluateDbSystem(dataset, apiKey),
+      evaluateDbSystem(dataset, apiKey, runId),
       runQueryOrNull(
         dataset,
         {
@@ -215,7 +229,8 @@ export async function evaluate(
           ],
           breakdowns: ["service.instrumentation_skill.branch"],
         },
-        apiKey
+        apiKey,
+        runId
       ),
       runQueryOrNull(
         dataset,
@@ -226,7 +241,8 @@ export async function evaluate(
             { column: "any.trace.parent_id", op: "exists" },
           ],
         },
-        apiKey
+        apiKey,
+        runId
       ),
       runQueryOrNull(
         dataset,
@@ -236,7 +252,8 @@ export async function evaluate(
           orders: [{ op: "COUNT", order: "descending" }],
           limit: 1,
         },
-        apiKey
+        apiKey,
+        runId
       ),
       fetchColumns(dataset, apiKey),
     ]);
@@ -258,9 +275,27 @@ export async function evaluate(
   );
   const rootlessCount = (rootless?.[0]?.["COUNT"] as number) ?? 0;
   const topSpanCount = (explosion?.[0]?.["COUNT"] as number) ?? 0;
-  // Deprecated semantic-convention attributes present in the dataset (null if columns unavailable).
+  // current_semconv must be RUN-SCOPED. `columns` is the dataset's column schema, which
+  // persists across runs — a legacy column existing there only means *some* past run emitted
+  // it, not this one. So take the legacy columns as candidates, then confirm each is actually
+  // present in THIS run's spans (run-scoped existence query) before flagging it.
+  const legacyCandidates = columns === null ? null : columns.filter((c) => c in DEPRECATED_SEMCONV);
   const deprecatedFound =
-    columns === null ? null : columns.filter((c) => c in DEPRECATED_SEMCONV);
+    legacyCandidates === null
+      ? null
+      : (
+          await Promise.all(
+            legacyCandidates.map(async (c) => {
+              const rows = await runQueryOrNull(
+                dataset,
+                { calculations: [{ op: "COUNT" }], filters: [{ column: c, op: "exists" }] },
+                apiKey,
+                runId
+              );
+              return ((rows?.[0]?.["COUNT"] as number) ?? 0) > 0 ? c : null;
+            })
+          )
+        ).filter((c): c is string => c !== null);
 
   return {
     spans_arriving: { pass: totalSpans > 0, value: totalSpans },

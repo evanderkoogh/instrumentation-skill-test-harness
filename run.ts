@@ -86,6 +86,10 @@ async function runApp(app: string): Promise<void> {
   const tracer = getTracer();
   const { dataset } = readAppConfig(app);
   const timestamp = new Date().toISOString();
+  // Unique per app-run. The collector stamps it on every span as harness.run_id, and the
+  // evaluation filters its Honeycomb queries to it — so a run is only ever scored against
+  // its own telemetry (the dataset is shared and its column schema persists across runs).
+  const runId = `${app}-${timestamp}`;
   const log = makeProgressLog(app);
 
   log(`\n▶ Run: ${app}  dataset: ${dataset}${modelArg ? `  model: ${modelArg}` : ""}`);
@@ -174,7 +178,7 @@ async function runApp(app: string): Promise<void> {
       try {
         await tracer.startActiveSpan("start", async (span) => {
           try {
-            harnessStart(app);
+            harnessStart(app, runId);
           } catch (err) {
             span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
             throw err;
@@ -215,7 +219,7 @@ async function runApp(app: string): Promise<void> {
       const { criteria, weaver } = await tracer.startActiveSpan("evaluate", async (span) => {
         try {
           const [hc, weaverResult] = await Promise.all([
-            evaluate(dataset, queryApiKey),
+            evaluate(dataset, queryApiKey, runId),
             runWeaverLiveCheck(app),
           ]);
           const merged: EvaluationResults = {

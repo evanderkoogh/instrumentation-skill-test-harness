@@ -177,12 +177,17 @@ start_collector() {
     fi
   done
 
+  # Per-run id stamped onto every span by the collector (resource/run_id processor) so the
+  # evaluation can scope its queries to this run. Provided by run.ts; fall back to an
+  # app+timestamp id if invoked standalone.
+  local run_id="${HARNESS_RUN_ID:-$APP-$(date +%s)}"
   sed \
     -e "s|%COLLECTOR_GRPC_PORT%|$col_grpc|g" \
     -e "s|%COLLECTOR_HTTP_PORT%|$col_http|g" \
     -e "s|%HONEYCOMB_ENDPOINT%|$hc_endpoint|g" \
     -e "s|%API_KEY%|$hc_key|g" \
     -e "s|%WEAVER_GRPC_ENDPOINT%|127.0.0.1:$weaver_grpc|g" \
+    -e "s|%RUN_ID%|$run_id|g" \
     "$template" > "$COLLECTOR_CONFIG"
 
   echo "Starting fan-out collector (app http:$col_http -> Honeycomb + weaver)..."

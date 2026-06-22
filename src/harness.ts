@@ -33,10 +33,13 @@ export function harness(app: string, ...args: string[]): string {
   return result.stdout ?? "";
 }
 
-export function harnessStart(app: string): void {
+export function harnessStart(app: string, runId?: string): void {
   const result = spawnSync(HARNESS, [app, "start"], {
     encoding: "utf8",
     stdio: ["inherit", "pipe", "pipe"],
+    // Pass the run id so the collector stamps harness.run_id on every span
+    // (collector.template.yaml), letting the eval scope its queries to this run.
+    env: runId ? { ...process.env, HARNESS_RUN_ID: runId } : process.env,
   });
   if (result.status !== 0) {
     throw new StartupFailure(result.stderr ?? "");
