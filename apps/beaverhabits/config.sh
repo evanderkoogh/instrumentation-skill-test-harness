@@ -63,12 +63,9 @@ cmd_start() {
   # NOTE: service.name is intentionally NOT set here. The instrumentation skill must
   # hardcode service.name in the application's OTel Resource so spans land in the
   # "$APP_DATASET" dataset. The evaluation verifies this (service_name criterion).
-  local otel_resource_attrs=""
-  if [[ -f "$REPO_DIR/.skill-version" ]]; then
-    # shellcheck disable=SC1090
-    source "$REPO_DIR/.skill-version"
-    otel_resource_attrs="service.instrumentation_skill.branch=${SKILL_BRANCH},service.instrumentation_skill.git_sha=${SKILL_SHA},service.instrumentation_skill.commit=${SKILL_COMMIT_MSG}"
-  fi
+  # Harness-tracking attributes (harness.run_id, service.instrumentation_skill.*) are NOT
+  # set on the app — the fan-out collector stamps them onto the Honeycomb-bound copy only,
+  # keeping the weaver pipeline's view of the telemetry clean (see collector.template.yaml).
 
   echo "Starting beaverhabits on port $APP_HTTP_PORT..."
   (
@@ -79,7 +76,6 @@ cmd_start() {
     TRUSTED_LOCAL_EMAIL=test@example.com \
     OTEL_EXPORTER_OTLP_ENDPOINT="${OTEL_EXPORTER_OTLP_ENDPOINT:-https://api.honeycomb.io}" \
     OTEL_EXPORTER_OTLP_HEADERS="${OTEL_EXPORTER_OTLP_HEADERS:-}" \
-    OTEL_RESOURCE_ATTRIBUTES="$otel_resource_attrs" \
     uv run uvicorn beaverhabits.main:app --workers 1 --port "$APP_HTTP_PORT" --host 0.0.0.0
   ) > "$LOG_DIR/beaverhabits.log" 2>&1 &
   local pid=$!

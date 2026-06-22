@@ -52,13 +52,9 @@ cmd_start() {
   # SQLite lives under ./data/gorm.db (GORM auto-migrates on boot); ensure the dir exists.
   mkdir -p "$REPO_DIR/data"
 
-  # Tag spans with the skill version, mirroring broadleaf's start script. The Go OTel
-  # SDK picks these up via OTEL_RESOURCE_ATTRIBUTES (standard env-based resource detection).
-  if [[ -f "$REPO_DIR/.skill-version" ]]; then
-    # shellcheck disable=SC1091
-    source "$REPO_DIR/.skill-version"
-    export OTEL_RESOURCE_ATTRIBUTES="service.instrumentation_skill.branch=${SKILL_BRANCH},service.instrumentation_skill.git_sha=${SKILL_SHA}"
-  fi
+  # Harness-tracking attributes (harness.run_id, service.instrumentation_skill.*) are NOT
+  # set on the app — the fan-out collector stamps them onto the Honeycomb-bound copy only,
+  # keeping the weaver pipeline's view of the telemetry clean (see collector.template.yaml).
   # NOTE: service.name is intentionally NOT set here. The instrumentation skill is
   # responsible for hardcoding service.name in the application's OTel Resource so that
   # spans land in the "$APP_DATASET" dataset. The evaluation verifies this (service_name

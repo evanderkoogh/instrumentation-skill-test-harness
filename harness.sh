@@ -188,6 +188,13 @@ start_collector() {
 
   echo "Starting weaver live-check receiver (grpc:$weaver_grpc admin:$weaver_admin registry:$registry_used)..."
   # Long inactivity timeout: src/weaver.ts explicitly finalizes via the admin /stop endpoint.
+  # NOTE: we deliberately do NOT pass --include-unreferenced. The registry the skill
+  # produces is expected to be self-describing — it must `import` the upstream semconv
+  # attribute groups it builds on (see the otel-instrumentation-implementation skill), so
+  # standard attributes (http.*, db.*, server.*, …) resolve on their own. A registry that
+  # only declares semconv as a `dependency` without importing from it will (correctly)
+  # score those standard attributes as violations: that is a real portability defect in
+  # the registry, not a measurement artifact, and we want the run to surface it.
   "$weaver_bin" registry live-check \
     --input-source otlp \
     --otlp-grpc-address 127.0.0.1 --otlp-grpc-port "$weaver_grpc" \
@@ -212,10 +219,28 @@ start_collector() {
     fi
   done
 
-  # Per-run id stamped onto every span by the collector (resource/run_id processor) so the
+  # Per-run id stamped onto every span by the collector (resource/honeycomb processor) so the
   # evaluation can scope its queries to this run. Provided by run.ts; fall back to an
   # app+timestamp id if invoked standalone.
   local run_id="${HARNESS_RUN_ID:-$APP-$(date +%s)}"
+
+  # Skill-version attributes are stamped onto Honeycomb-bound telemetry by the collector
+  # (not by the app), so the weaver pipeline sees clean app telemetry. Read them from the
+  # .skill-version marker written at instrument time; default to "unknown" if absent.
+  local skill_branch="unknown" skill_git_sha="unknown" skill_commit="unknown"
+  if [[ -f "$REPO_DIR/.skill-version" ]]; then
+    # shellcheck disable=SC1091
+    source "$REPO_DIR/.skill-version"
+    skill_branch="${SKILL_BRANCH:-unknown}"
+    skill_git_sha="${SKILL_SHA:-unknown}"
+    skill_commit="${SKILL_COMMIT_MSG:-unknown}"
+  fi
+  # Escape characters special to a sed replacement (\, &, |) — the commit message is free text.
+  local esc='s/[\\&|]/\\&/g'
+  skill_branch=$(printf '%s' "$skill_branch" | sed -e "$esc")
+  skill_git_sha=$(printf '%s' "$skill_git_sha" | sed -e "$esc")
+  skill_commit=$(printf '%s' "$skill_commit" | sed -e "$esc")
+
   sed \
     -e "s|%COLLECTOR_GRPC_PORT%|$col_grpc|g" \
     -e "s|%COLLECTOR_HTTP_PORT%|$col_http|g" \
@@ -223,6 +248,9 @@ start_collector() {
     -e "s|%API_KEY%|$hc_key|g" \
     -e "s|%WEAVER_GRPC_ENDPOINT%|127.0.0.1:$weaver_grpc|g" \
     -e "s|%RUN_ID%|$run_id|g" \
+    -e "s|%SKILL_BRANCH%|$skill_branch|g" \
+    -e "s|%SKILL_GIT_SHA%|$skill_git_sha|g" \
+    -e "s|%SKILL_COMMIT%|$skill_commit|g" \
     "$template" > "$COLLECTOR_CONFIG"
 
   echo "Starting fan-out collector (app http:$col_http -> Honeycomb + weaver)..."

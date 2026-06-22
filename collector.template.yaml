@@ -21,13 +21,29 @@ receivers:
         endpoint: 127.0.0.1:%COLLECTOR_HTTP_PORT%
 
 processors:
-  # Stamp every span/metric/log with this run's id so the evaluation can scope its queries
-  # to the current run only. The Honeycomb dataset is shared across runs and its column
-  # schema persists, so without this the eval picks up stale spans/columns from prior runs.
-  resource/run_id:
+  # Stamp harness-managed attributes onto the telemetry destined for Honeycomb only:
+  #   - harness.run_id: scopes the evaluation's queries to this run. The dataset is shared
+  #     across runs and its column schema persists, so without this the eval picks up stale
+  #     spans/columns from prior runs.
+  #   - service.instrumentation_skill.*: records which skill version produced the run.
+  # These are added HERE rather than by the app (via OTEL_RESOURCE_ATTRIBUTES) on purpose:
+  # the app's telemetry stays clean, so the weaver pipeline below scores only what the
+  # instrumentation actually emits. The skill cannot define these in its registry, and
+  # service.instrumentation_skill.* even collides with the standard `service` namespace, so
+  # weaver would otherwise score them as violations through no fault of the instrumentation.
+  resource/honeycomb:
     attributes:
       - key: harness.run_id
         value: "%RUN_ID%"
+        action: upsert
+      - key: service.instrumentation_skill.branch
+        value: "%SKILL_BRANCH%"
+        action: upsert
+      - key: service.instrumentation_skill.git_sha
+        value: "%SKILL_GIT_SHA%"
+        action: upsert
+      - key: service.instrumentation_skill.commit
+        value: "%SKILL_COMMIT%"
         action: upsert
 
 exporters:
@@ -45,16 +61,35 @@ service:
   telemetry:
     logs:
       level: warn
+    # Disable the collector's own internal metrics. By default otelcol exposes them via a
+    # Prometheus endpoint on the hardcoded localhost:8888; with one collector per app under
+    # `run.ts --parallel`, every collector would fight over that single port and all but one
+    # would die on startup ("bind: address already in use"). We don't scrape these metrics,
+    # so turning them off removes the collision entirely.
+    metrics:
+      level: none
   pipelines:
+    # One receiver fans out to two pipelines per signal: Honeycomb gets the harness
+    # attributes stamped on (run scoping + skill-version tracking); weaver receives the
+    # app's telemetry untouched, so live-check scores only what the instrumentation emits.
     traces:
       receivers: [otlp]
-      processors: [resource/run_id]
-      exporters: [otlphttp/honeycomb, otlp/weaver]
+      processors: [resource/honeycomb]
+      exporters: [otlphttp/honeycomb]
+    traces/weaver:
+      receivers: [otlp]
+      exporters: [otlp/weaver]
     metrics:
       receivers: [otlp]
-      processors: [resource/run_id]
-      exporters: [otlphttp/honeycomb, otlp/weaver]
+      processors: [resource/honeycomb]
+      exporters: [otlphttp/honeycomb]
+    metrics/weaver:
+      receivers: [otlp]
+      exporters: [otlp/weaver]
     logs:
       receivers: [otlp]
-      processors: [resource/run_id]
-      exporters: [otlphttp/honeycomb, otlp/weaver]
+      processors: [resource/honeycomb]
+      exporters: [otlphttp/honeycomb]
+    logs/weaver:
+      receivers: [otlp]
+      exporters: [otlp/weaver]

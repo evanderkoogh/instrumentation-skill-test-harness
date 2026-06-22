@@ -11,11 +11,9 @@ if [[ ! -d "$EXPLODED" || "$JAR" -nt "$EXPLODED" ]]; then
   (cd "$EXPLODED" && jar -xf "$JAR")
 fi
 
-if [[ -f "$SCRIPT_DIR/.skill-version" ]]; then
-  # shellcheck disable=SC1091
-  source "$SCRIPT_DIR/.skill-version"
-  export OTEL_RESOURCE_ATTRIBUTES="service.instrumentation_skill.branch=${SKILL_BRANCH},service.instrumentation_skill.git_sha=${SKILL_SHA}"
-fi
+# Harness-tracking attributes (harness.run_id, service.instrumentation_skill.*) are NOT set
+# here — the fan-out collector stamps them onto the Honeycomb-bound copy only, keeping the
+# weaver pipeline's view of the telemetry clean (see collector.template.yaml).
 
 exec java \
   -javaagent:"$SPRING_INSTRUMENT" \
