@@ -14,6 +14,11 @@ export interface RunRecord {
   skill_branch: string;
   skill_sha: string;
   skill_commit: string;
+  // Authoritative version id (hash of live skill files) + whether the git sha is incomplete
+  // (uncommitted working-tree changes) + the run's human label. See harness.sh / readSkillVersion.
+  skill_content_hash: string;
+  skill_uncommitted: boolean;
+  skill_description: string | null;
   failed: boolean;
   failure_reason: string | null;
   agent: AgentMetrics;
@@ -35,11 +40,25 @@ function formatUsd(usd: number): string {
 // `log` lets callers tee the summary into a run-scoped progress file as well as stdout;
 // defaults to console.log for callers that only want the terminal.
 export function printSummary(record: RunRecord, log: (line: string) => void = console.log): void {
-  const { app, skill_branch, skill_sha, failed, failure_reason, agent, criteria, weaver } =
-    record;
+  const {
+    app,
+    skill_branch,
+    skill_sha,
+    skill_content_hash,
+    skill_uncommitted,
+    skill_description,
+    failed,
+    failure_reason,
+    agent,
+    criteria,
+    weaver,
+  } = record;
 
   log("\n" + "─".repeat(60));
-  log(`Run: ${app}  skill: ${skill_branch} @ ${skill_sha}`);
+  // Headline by content hash (authoritative); git sha + "uncommitted" show baseline/lineage.
+  const shaPart = `${skill_sha}${skill_uncommitted ? "+uncommitted" : ""}`;
+  const descPart = skill_description ? ` — ${skill_description}` : "";
+  log(`Run: ${app}  skill: ${skill_branch} @ ${shaPart} [${skill_content_hash}]${descPart}`);
   log(
     `Agent: ${agent.tool_uses} tool calls · ${agent.total_tokens} tokens · ` +
       `${formatUsd(agent.cost.total_usd)} · ${(agent.duration_ms / 1000).toFixed(1)}s`

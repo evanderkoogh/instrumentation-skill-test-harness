@@ -23,21 +23,27 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 config({ path: resolve(__dirname, ".env") });
 
 // --- Arg parsing ---
-// Usage: npx tsx run.ts <app...|all> [--parallel] [--model <model-id>]
+// Usage: npx tsx run.ts <app...|all> [--parallel] [--model <model-id>] [--skill-desc <text>]
 // One app  → run inline (full in-process tracing).
 // Many apps → spawn one child process per app, sequential or --parallel.
 const apps: string[] = [];
 let parallel = false;
 let modelArg: string | undefined;
+// Human label of intent for this run (e.g. "free-port weaver"). Recorded alongside the
+// skill content hash so a run is identifiable even with uncommitted edits.
+let skillDesc: string | undefined;
 for (let i = 2; i < process.argv.length; i++) {
   const a = process.argv[i];
   if (a === "--parallel") parallel = true;
   else if (a === "--model") modelArg = process.argv[++i];
+  else if (a === "--skill-desc") skillDesc = process.argv[++i];
   else apps.push(a);
 }
 
 if (apps.length === 0) {
-  console.error("Usage: npx tsx run.ts <app...|all> [--parallel] [--model <model-id>]");
+  console.error(
+    "Usage: npx tsx run.ts <app...|all> [--parallel] [--model <model-id>] [--skill-desc <text>]"
+  );
   process.exit(1);
 }
 
@@ -115,12 +121,19 @@ async function runApp(app: string): Promise<void> {
         });
       }
 
-      const skill = readSkillVersion(app);
-      log(`  skill: ${skill.branch} @ ${skill.sha}`);
+      const skill = { ...readSkillVersion(app), description: skillDesc };
+      const shaPart = `${skill.sha}${skill.uncommitted ? "+uncommitted" : ""}`;
+      log(
+        `  skill: ${skill.branch} @ ${shaPart} [${skill.contentHash}]` +
+          (skill.description ? ` — ${skill.description}` : "")
+      );
       rootSpan.setAttributes({
         "skill.branch": skill.branch,
         "skill.sha": skill.sha,
         "skill.commit": skill.commit,
+        "skill.content_hash": skill.contentHash,
+        "skill.uncommitted": skill.uncommitted,
+        ...(skill.description ? { "skill.description": skill.description } : {}),
       });
 
       // --- Instrumentation agent ---
@@ -163,11 +176,13 @@ async function runApp(app: string): Promise<void> {
         "agent.cost_usd": agentMetrics.cost.total_usd,
       });
 
-      // Re-write .skill-version: the agent may have overwritten it with its own content
+      // Re-write .skill-version: the agent may have overwritten it with its own content.
+      // Preserve the content hash + uncommitted flag the instrument step computed.
       const versionPath = resolve(__dirname, "checkouts", app, ".skill-version");
       writeFileSync(
         versionPath,
-        `SKILL_BRANCH=${skill.branch}\nSKILL_SHA=${skill.sha}\nSKILL_COMMIT_MSG="${skill.commit}"\n`
+        `SKILL_BRANCH=${skill.branch}\nSKILL_SHA=${skill.sha}\nSKILL_COMMIT_MSG="${skill.commit}"\n` +
+          `SKILL_CONTENT_HASH=${skill.contentHash}\nSKILL_UNCOMMITTED=${skill.uncommitted}\n`
       );
 
       const baseRecord = {
@@ -177,6 +192,9 @@ async function runApp(app: string): Promise<void> {
         skill_branch: skill.branch,
         skill_sha: skill.sha,
         skill_commit: skill.commit,
+        skill_content_hash: skill.contentHash,
+        skill_uncommitted: skill.uncommitted,
+        skill_description: skill.description ?? null,
         agent: agentMetrics,
       };
 
@@ -306,6 +324,7 @@ async function runApp(app: string): Promise<void> {
 function spawnChild(app: string): Promise<number> {
   const args = ["tsx", resolve(__dirname, "run.ts"), app];
   if (modelArg) args.push("--model", modelArg);
+  if (skillDesc) args.push("--skill-desc", skillDesc);
   return new Promise((res) => {
     const child = spawn("npx", args, { stdio: "inherit", cwd: __dirname });
     child.on("exit", (code) => res(code ?? 1));

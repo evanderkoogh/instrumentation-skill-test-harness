@@ -228,12 +228,15 @@ start_collector() {
   # (not by the app), so the weaver pipeline sees clean app telemetry. Read them from the
   # .skill-version marker written at instrument time; default to "unknown" if absent.
   local skill_branch="unknown" skill_git_sha="unknown" skill_commit="unknown"
+  local skill_content_hash="unknown" skill_uncommitted="unknown"
   if [[ -f "$REPO_DIR/.skill-version" ]]; then
     # shellcheck disable=SC1091
     source "$REPO_DIR/.skill-version"
     skill_branch="${SKILL_BRANCH:-unknown}"
     skill_git_sha="${SKILL_SHA:-unknown}"
     skill_commit="${SKILL_COMMIT_MSG:-unknown}"
+    skill_content_hash="${SKILL_CONTENT_HASH:-unknown}"
+    skill_uncommitted="${SKILL_UNCOMMITTED:-unknown}"
   fi
   # Escape characters special to a sed replacement (\, &, |) — the commit message is free text.
   local esc='s/[\\&|]/\\&/g'
@@ -251,6 +254,8 @@ start_collector() {
     -e "s|%SKILL_BRANCH%|$skill_branch|g" \
     -e "s|%SKILL_GIT_SHA%|$skill_git_sha|g" \
     -e "s|%SKILL_COMMIT%|$skill_commit|g" \
+    -e "s|%SKILL_CONTENT_HASH%|$skill_content_hash|g" \
+    -e "s|%SKILL_UNCOMMITTED%|$skill_uncommitted|g" \
     "$template" > "$COLLECTOR_CONFIG"
 
   echo "Starting fan-out collector (app http:$col_http -> Honeycomb + weaver)..."
@@ -700,11 +705,32 @@ harness_instrument() {
   local skill_commit_msg
   skill_commit_msg=$(git -C "$skill_git_root" log -1 --format=%s 2>/dev/null || echo "unknown")
 
+  # content_hash: digest of the LIVE skill/agent markdown actually loaded, so it reflects
+  # uncommitted edits the git SHA can't. Hash each file's relative path + content (path-sensitive),
+  # then digest the listing. uncommitted: whether the skill repo has working-tree changes.
+  local skill_content_hash="unknown" skill_uncommitted="unknown"
+  if [[ -d "$claude_plugin_root" ]]; then
+    skill_content_hash=$(
+      ( cd "$claude_plugin_root" && find skills agents -type f -name '*.md' 2>/dev/null | LC_ALL=C sort |
+        while IFS= read -r f; do printf '%s\n' "$f"; shasum -a 256 "$f"; done
+      ) | shasum -a 256 | cut -c1-12
+    )
+  fi
+  if git -C "$skill_git_root" rev-parse >/dev/null 2>&1; then
+    if [[ -n "$(git -C "$skill_git_root" status --porcelain 2>/dev/null)" ]]; then
+      skill_uncommitted=true
+    else
+      skill_uncommitted=false
+    fi
+  fi
+
   # Write .skill-version so cmd_start can tag spans regardless of language
   cat > "$REPO_DIR/.skill-version" <<EOF
 SKILL_BRANCH=$skill_branch
 SKILL_SHA=$skill_sha
 SKILL_COMMIT_MSG="$skill_commit_msg"
+SKILL_CONTENT_HASH=$skill_content_hash
+SKILL_UNCOMMITTED=$skill_uncommitted
 EOF
 
   local prompt_file="$TMP_DIR/.instrument-prompt.$APP.md"

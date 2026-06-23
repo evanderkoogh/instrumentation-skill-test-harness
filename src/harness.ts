@@ -53,9 +53,13 @@ export function readAppConfig(app: string): { dataset: string } {
   return { dataset: match?.[1] ?? app };
 }
 
-export function readSkillVersion(
-  app: string
-): { branch: string; sha: string; commit: string } {
+export function readSkillVersion(app: string): {
+  branch: string;
+  sha: string;
+  commit: string;
+  contentHash: string;
+  uncommitted: boolean;
+} {
   try {
     const versionPath = resolve(__dirname, "..", "checkouts", app, ".skill-version");
     const content = readFileSync(versionPath, "utf8");
@@ -63,9 +67,13 @@ export function readSkillVersion(
     const sha = content.match(/SKILL_SHA=(.+)/)?.[1]?.trim() ?? "unknown";
     const commit =
       content.match(/SKILL_COMMIT_MSG="(.+)"/)?.[1]?.trim() ?? "unknown";
-    return { branch, sha, commit };
+    // content_hash reflects the live (incl. uncommitted) skill files actually loaded —
+    // the git SHA can't, so this is the authoritative version id. See harness.sh instrument.
+    const contentHash = content.match(/SKILL_CONTENT_HASH=(.+)/)?.[1]?.trim() ?? "unknown";
+    const uncommitted = content.match(/SKILL_UNCOMMITTED=(.+)/)?.[1]?.trim() === "true";
+    return { branch, sha, commit, contentHash, uncommitted };
   } catch {
-    return { branch: "unknown", sha: "unknown", commit: "unknown" };
+    return { branch: "unknown", sha: "unknown", commit: "unknown", contentHash: "unknown", uncommitted: false };
   }
 }
 

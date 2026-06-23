@@ -45,6 +45,14 @@ processors:
       - key: service.instrumentation_skill.commit
         value: "%SKILL_COMMIT%"
         action: upsert
+      # content_hash is the authoritative "what actually ran" id — a hash of the live skill
+      # files, so it reflects uncommitted edits the git_sha can't. uncommitted flags exactly that.
+      - key: service.instrumentation_skill.content_hash
+        value: "%SKILL_CONTENT_HASH%"
+        action: upsert
+      - key: service.instrumentation_skill.uncommitted
+        value: "%SKILL_UNCOMMITTED%"
+        action: upsert
 
 exporters:
   otlphttp/honeycomb:

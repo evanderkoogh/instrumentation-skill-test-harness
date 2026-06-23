@@ -47,6 +47,12 @@ export interface SkillVersion {
   branch: string;
   sha: string;
   commit: string;
+  // Authoritative "what actually ran" id — a hash of the live skill files (reflects
+  // uncommitted edits the git sha misses). `uncommitted` flags that the sha is incomplete.
+  contentHash: string;
+  uncommitted: boolean;
+  // Human label of intent for this run, passed in via `--skill-desc` (optional).
+  description?: string;
 }
 
 export async function runInstrumentation(
@@ -136,6 +142,9 @@ export async function runInstrumentation(
             `app=${app}`,
             skill ? `skill.branch=${encodeURIComponent(skill.branch)}` : "",
             skill ? `skill.sha=${encodeURIComponent(skill.sha)}` : "",
+            skill ? `skill.content_hash=${encodeURIComponent(skill.contentHash)}` : "",
+            skill ? `skill.uncommitted=${skill.uncommitted}` : "",
+            skill?.description ? `skill.description=${encodeURIComponent(skill.description)}` : "",
           ].filter(Boolean).join(","),
         },
       },
