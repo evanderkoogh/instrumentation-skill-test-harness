@@ -26,6 +26,12 @@ export function recordRun(record: RunRecord): void {
   appendFileSync(RUNS_FILE, JSON.stringify(record) + "\n");
 }
 
+// Sub-cent costs are meaningful here (cache reads are cheap per token), so show
+// 4 decimals below $1 and 2 above.
+function formatUsd(usd: number): string {
+  return usd < 1 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
+}
+
 // `log` lets callers tee the summary into a run-scoped progress file as well as stdout;
 // defaults to console.log for callers that only want the terminal.
 export function printSummary(record: RunRecord, log: (line: string) => void = console.log): void {
@@ -35,7 +41,18 @@ export function printSummary(record: RunRecord, log: (line: string) => void = co
   log("\n" + "─".repeat(60));
   log(`Run: ${app}  skill: ${skill_branch} @ ${skill_sha}`);
   log(
-    `Agent: ${agent.tool_uses} tool calls · ${agent.total_tokens} tokens · ${(agent.duration_ms / 1000).toFixed(1)}s`
+    `Agent: ${agent.tool_uses} tool calls · ${agent.total_tokens} tokens · ` +
+      `${formatUsd(agent.cost.total_usd)} · ${(agent.duration_ms / 1000).toFixed(1)}s`
+  );
+  // Token mix + where the money went. Cache reads usually dominate.
+  log(
+    `  tokens: ${agent.input_tokens} in · ${agent.output_tokens} out · ` +
+      `${agent.cache_read_input_tokens} cache-read · ${agent.cache_creation_input_tokens} cache-write`
+  );
+  log(
+    `  cost: ${formatUsd(agent.cost.total_usd)} ` +
+      `(in ${formatUsd(agent.cost.input_usd)} · out ${formatUsd(agent.cost.output_usd)} · ` +
+      `cache-read ${formatUsd(agent.cost.cache_read_usd)} · cache-write ${formatUsd(agent.cost.cache_write_usd)})`
   );
 
   if (failed) {

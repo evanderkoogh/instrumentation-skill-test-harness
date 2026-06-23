@@ -134,7 +134,10 @@ async function runApp(app: string): Promise<void> {
             "agent.tool_uses": metrics.tool_uses,
             "agent.input_tokens": metrics.input_tokens,
             "agent.output_tokens": metrics.output_tokens,
+            "agent.cache_read_input_tokens": metrics.cache_read_input_tokens,
+            "agent.cache_creation_input_tokens": metrics.cache_creation_input_tokens,
             "agent.total_tokens": metrics.total_tokens,
+            "agent.cost_usd": metrics.cost.total_usd,
             "agent.duration_ms": metrics.duration_ms,
           });
           return metrics;
@@ -145,14 +148,19 @@ async function runApp(app: string): Promise<void> {
           span.end();
         }
       });
+      const costStr =
+        agentMetrics.cost.total_usd < 1
+          ? `$${agentMetrics.cost.total_usd.toFixed(4)}`
+          : `$${agentMetrics.cost.total_usd.toFixed(2)}`;
       log(
-        `  done: ${agentMetrics.tool_uses} tool calls · ${agentMetrics.total_tokens} tokens · ${(agentMetrics.duration_ms / 1000).toFixed(1)}s`
+        `  done: ${agentMetrics.tool_uses} tool calls · ${agentMetrics.total_tokens} tokens · ${costStr} · ${(agentMetrics.duration_ms / 1000).toFixed(1)}s`
       );
       rootSpan.setAttributes({
         "agent.model": agentMetrics.model,
         "agent.session_id": agentMetrics.session_id,
         "agent.tool_uses": agentMetrics.tool_uses,
         "agent.total_tokens": agentMetrics.total_tokens,
+        "agent.cost_usd": agentMetrics.cost.total_usd,
       });
 
       // Re-write .skill-version: the agent may have overwritten it with its own content

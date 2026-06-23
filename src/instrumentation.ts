@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 import { makeFsGuard, denyReason } from "./sandbox.js";
+import { costFromModelUsage, type CostBreakdown, type TokenBreakdown } from "./pricing.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 function toolDetail(name: string, input: Record<string, unknown>): string {
@@ -25,9 +26,19 @@ function toolDetail(name: string, input: Record<string, unknown>): string {
 export interface AgentMetrics {
   duration_ms: number;
   tool_uses: number;
-  input_tokens: number;
+  input_tokens: number; // uncached input only
   output_tokens: number;
+  // Cache tokens dominate cost on a long agentic run but were previously
+  // ignored, making total_tokens (and any cost derived from it) meaningless.
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+  // total_tokens is the full billed prompt + output = input + output + cache
+  // read + cache creation. (Historically this was only input + output.)
   total_tokens: number;
+  cost: CostBreakdown; // single dollar figure (+ per-bucket breakdown)
+  // The agent SDK's own cost figure, when it reports one — a cross-check
+  // against our token-derived `cost.total_usd`.
+  sdk_cost_usd: number | null;
   model: string;
   session_id: string;
 }
@@ -72,8 +83,11 @@ export async function runInstrumentation(
 
   const start = Date.now();
   let toolUses = 0;
-  let inputTokens = 0;
-  let outputTokens = 0;
+  // Cumulative usage comes from the result event's `modelUsage` map (per model,
+  // whole-session totals). The top-level `usage` field is only the final turn —
+  // reading it under-counts tokens (and cost) by ~10x on a long run.
+  let perModel: Array<{ model: string; tokens: TokenBreakdown }> = [];
+  let sdkCostUsd: number | null = null;
   let resolvedModel = model ?? "unknown";
   let sessionId = "unknown";
   // The agent's final summary text — where it communicates the required env-var contract
@@ -157,8 +171,33 @@ export async function runInstrumentation(
           if (msgText.trim()) finalOutput = msgText;
         }
       } else if (event.type === "result") {
-        inputTokens = event.usage?.input_tokens ?? 0;
-        outputTokens = event.usage?.output_tokens ?? 0;
+        // `modelUsage` is the cumulative, per-model token total for the whole
+        // session — keyed by model id so a sub-agent on a different tier is
+        // costed correctly. (The top-level `usage` is only the final turn.)
+        const modelUsage = (event as {
+          modelUsage?: Record<
+            string,
+            {
+              inputTokens?: number;
+              outputTokens?: number;
+              cacheReadInputTokens?: number;
+              cacheCreationInputTokens?: number;
+            }
+          >;
+        }).modelUsage;
+        if (modelUsage) {
+          perModel = Object.entries(modelUsage).map(([m, u]) => ({
+            model: m,
+            tokens: {
+              input_tokens: u.inputTokens ?? 0,
+              output_tokens: u.outputTokens ?? 0,
+              cache_read_input_tokens: u.cacheReadInputTokens ?? 0,
+              cache_creation_input_tokens: u.cacheCreationInputTokens ?? 0,
+            },
+          }));
+        }
+        const cost = (event as { total_cost_usd?: number }).total_cost_usd;
+        if (typeof cost === "number") sdkCostUsd = cost;
         if (event.subtype === "success" && typeof event.result === "string" && event.result.trim()) {
           finalOutput = event.result;
         }
@@ -181,12 +220,29 @@ export async function runInstrumentation(
   // Persist the agent's final summary for the env_var_output criterion (see src/envvars.ts).
   writeFileSync(resolve(harnessRoot, "tmp", `agent-output.${app}.txt`), finalOutput);
 
+  // Sum the per-model cumulative token totals for the run-wide breakdown.
+  const tokenTotals = perModel.reduce(
+    (acc, { tokens }) => ({
+      input: acc.input + tokens.input_tokens,
+      output: acc.output + tokens.output_tokens,
+      cache_read: acc.cache_read + tokens.cache_read_input_tokens,
+      cache_creation: acc.cache_creation + tokens.cache_creation_input_tokens,
+    }),
+    { input: 0, output: 0, cache_read: 0, cache_creation: 0 }
+  );
+  const cost = costFromModelUsage(perModel);
+
   return {
     duration_ms: Date.now() - start,
     tool_uses: toolUses,
-    input_tokens: inputTokens,
-    output_tokens: outputTokens,
-    total_tokens: inputTokens + outputTokens,
+    input_tokens: tokenTotals.input,
+    output_tokens: tokenTotals.output,
+    cache_read_input_tokens: tokenTotals.cache_read,
+    cache_creation_input_tokens: tokenTotals.cache_creation,
+    total_tokens:
+      tokenTotals.input + tokenTotals.output + tokenTotals.cache_read + tokenTotals.cache_creation,
+    cost,
+    sdk_cost_usd: sdkCostUsd,
     model: resolvedModel,
     session_id: sessionId,
   };
