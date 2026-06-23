@@ -107,6 +107,35 @@ Use the **Playwright MCP** tools (`playwright_navigate`, `playwright_screenshot`
 
 This is enforced — not just documented — by a hard sandbox on the instrumentation agent (`src/sandbox.ts`, wired in as a `PreToolUse` hook in `src/instrumentation.ts`). The agent's filesystem access within the harness tree is confined to its own `checkouts/<app>/` plus the bundled `otel/` tooling (so it can run `weaver`); any `Read`/`Write`/`Edit`/`Bash` that touches the harness's own files — `src/` (incl. `evaluation.ts`/`weaver.ts`), `EVALUATION.md`, `harness.sh`, collector/weaver config, `.env`, or other apps' checkouts — is denied. Paths outside the harness entirely (system toolchains, dependency caches, `$HOME`, `/tmp`) stay reachable so the agent can still build and verify. This prevents the agent from reading the eval criteria ("the answer key") and overfitting the score.
 
+## Reviewing a skill
+
+The skills under `agent-skill/` are the deliverable. When reviewing or editing one, read it **as the
+agent that will actually run it** — a fresh, context-less agent whose *only* inputs are the skill text
+plus whatever the harness hands it. It cannot see this repo, prior runs, the evaluation criteria, or the
+reasoning behind a given line. Judge the skill purely on whether that agent, with those inputs, can
+follow it to a correct result. Review each skill from its real entry points:
+
+- **`otel-instrumentation-implementation`** — the reader is a context-less implementer that arrives in
+  one of two states: (a) an **initial instrumentation prompt** (repo path + app facts, nothing more),
+  or (b) a set of **verification findings to fix** and nothing else. The skill must stand on its own in
+  both: a first-time implementer must be able to instrument from zero, and a fix-cycle implementer must
+  be able to act on findings it was handed without re-deriving the whole engagement.
+- **`otel-verification`** — the reader is a **clean agent handed an already-instrumented app**, with no
+  knowledge of what was changed or why. It must be able to discover how to run and exercise the app, see
+  the emitted telemetry, and judge it against the contract from scratch.
+
+Guidelines for what to write into a skill:
+
+- **Avoid "scar tissue."** Don't accrete hyper-specific defensive instructions from individual past
+  failures. Each run surfaces a concrete defect, but the fix in the skill should be the *general
+  principle* that prevents the class of defect — not a narrow patch describing that one occurrence.
+  Excess scar tissue makes a skill long, brittle, and overfit to the apps we happen to test.
+- **Don't hardcode attribute (or metric) names unless absolutely necessary.** Prefer general, reactive
+  guidance (e.g. "catalogue any passed-through library attribute the live-check flags") over naming
+  specific attributes. Hardcoded names overfit to today's apps/instrumentation versions and rot quickly.
+
+(More review guidance will be added here as we learn more.)
+
 ## Adding a new app
 
 1. `mkdir apps/<name>`
