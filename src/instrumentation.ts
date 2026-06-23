@@ -16,9 +16,18 @@ function toolDetail(name: string, input: Record<string, unknown>): string {
     case "Edit":    return ` ${clean(input.file_path)}`;
     // Bash commands can be arbitrarily long; keep these capped.
     case "Bash":    return `  ${trunc(input.command, 120)}`;
-    // Sub-agent spawn (verification hand-off) — surface which agent + the task.
+    // Sub-agent spawn (verification hand-off) — surface which agent, the short task label, AND a
+    // generous slice of the actual prompt. The prompt is where the orchestrator must relay the
+    // verifier's findings verbatim to a re-spawned instrumenter; logging only the 80-char
+    // description hid whether that handoff was faithful or a lossy paraphrase. Cap high enough to
+    // see relayed findings, not so high it dumps a full initial prompt.
     case "Agent":
-    case "Task":    return ` [${clean(input.subagent_type ?? "?")}] ${trunc(input.description ?? input.prompt, 80)}`;
+    case "Task": {
+      const who = clean(input.subagent_type ?? "?");
+      const desc = trunc(input.description, 80);
+      const prompt = trunc(input.prompt, 1000);
+      return ` [${who}] ${desc}${prompt ? ` :: ${prompt}` : ""}`;
+    }
     default:        return "";
   }
 }
