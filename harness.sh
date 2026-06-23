@@ -286,9 +286,19 @@ EOF
   # Point the app's OTLP exporter at the local collector. cmd_start launches the app in
   # a subshell that inherits this exported env; the collector forwards to the real
   # Honeycomb endpoint/key captured above.
+  # Endpoint + protocol must agree: we point at the collector's HTTP port and declare
+  # http/protobuf. The collector also listens on gRPC, but instrumentation that hardcodes a
+  # gRPC exporter (ignoring OTEL_EXPORTER_OTLP_PROTOCOL) would speak gRPC to this HTTP port and
+  # silently drop ALL telemetry. Correct instrumentation selects its exporter from
+  # OTEL_EXPORTER_OTLP_PROTOCOL, so it follows whichever transport we set here.
   export OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:$col_http"
   export OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf"
   export OTEL_EXPORTER_OTLP_HEADERS=""
+  # Metrics export on a 60s periodic cycle by default — longer than a harness run, so a short
+  # run would capture zero metric datapoints (traces/logs use a few-second batch cadence and are
+  # unaffected). Shorten to 10s so metrics actually flush during the run + 15s flush wait. This is
+  # a harness-runtime concern only; a real long-running service hits the default interval fine.
+  export OTEL_METRIC_EXPORT_INTERVAL="10000"
   echo "App OTLP export -> $OTEL_EXPORTER_OTLP_ENDPOINT (fan-out to Honeycomb + weaver live-check)"
 }
 
