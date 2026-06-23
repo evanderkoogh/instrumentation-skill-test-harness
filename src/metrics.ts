@@ -61,7 +61,8 @@ export function printSummary(record: RunRecord, log: (line: string) => void = co
   log(`Run: ${app}  skill: ${skill_branch} @ ${shaPart} [${skill_content_hash}]${descPart}`);
   log(
     `Agent: ${agent.tool_uses} tool calls · ${agent.total_tokens} tokens · ` +
-      `${formatUsd(agent.cost.total_usd)} · ${(agent.duration_ms / 1000).toFixed(1)}s`
+      `${formatUsd(agent.cost.total_usd)} · ${(agent.duration_ms / 1000).toFixed(1)}s · ` +
+      `verifier ×${agent.verifier_invocations ?? 0}`
   );
   // Token mix + where the money went. Cache reads usually dominate.
   log(

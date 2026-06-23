@@ -48,6 +48,10 @@ export interface AgentMetrics {
   // The agent SDK's own cost figure, when it reports one — a cross-check
   // against our token-derived `cost.total_usd`.
   sdk_cost_usd: number | null;
+  // How many times the conductor spawned an `otel-verifier` sub-agent. 1 = instrument →
+  // verify → PASS on the first try; >1 = at least one FAIL drove a fix/re-verify cycle.
+  // Informational only (not a pass/fail criterion) — a window into instrumentation churn.
+  verifier_invocations: number;
   model: string;
   session_id: string;
 }
@@ -98,6 +102,8 @@ export async function runInstrumentation(
 
   const start = Date.now();
   let toolUses = 0;
+  // Count otel-verifier sub-agent spawns to surface instrument↔verify back-and-forth.
+  let verifierInvocations = 0;
   // Cumulative usage comes from the result event's `modelUsage` map (per model,
   // whole-session totals). The top-level `usage` field is only the final turn —
   // reading it under-counts tokens (and cost) by ~10x on a long run.
@@ -177,6 +183,14 @@ export async function runInstrumentation(
             if (type === "tool_use") {
               toolUses++;
               const b = block as { type: string; name: string; input: Record<string, unknown> };
+              // A Task/Agent spawn targeting otel-verifier is one verification pass; >1 means
+              // a FAIL drove a re-verify cycle. subagent_type may carry a plugin prefix.
+              if (
+                (b.name === "Task" || b.name === "Agent") &&
+                String(b.input.subagent_type ?? "").includes("otel-verifier")
+              ) {
+                verifierInvocations++;
+              }
               const detail = toolDetail(b.name, b.input);
               const elapsed = `${((Date.now() - start) / 1000).toFixed(0)}s`;
               console.log(`  [${app}|${agent}][${elapsed}] ${b.name}${detail}`);
@@ -261,6 +275,7 @@ export async function runInstrumentation(
       tokenTotals.input + tokenTotals.output + tokenTotals.cache_read + tokenTotals.cache_creation,
     cost,
     sdk_cost_usd: sdkCostUsd,
+    verifier_invocations: verifierInvocations,
     model: resolvedModel,
     session_id: sessionId,
   };
