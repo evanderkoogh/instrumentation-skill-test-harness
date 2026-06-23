@@ -201,17 +201,16 @@ async function evaluateDbSystem(
   return null;
 }
 
-// Prove metric datapoints were received for THIS run by querying the shared metrics dataset.
-// runQueryOrNull scopes by harness.run_id; we also break down by it so we can confirm the run's
-// id actually appears in a returned row — MAX alone returns a phantom {MAX: 0} (no run_id) on a
-// zero match, so a bare number is NOT proof. Returns the matching probe (+ its value) or null if
-// no probe's datapoints carry this run_id. A non-existent metric column makes the query error,
+// One sweep over the probe metrics: prove metric datapoints were received for THIS run by
+// querying the shared metrics dataset. runQueryOrNull scopes by harness.run_id; we also break
+// down by it so we can confirm the run's id actually appears in a returned row — MAX alone
+// returns a phantom {MAX: 0} (no run_id) on a zero match, so a bare number is NOT proof. Returns
+// the matching probe (+ its value) or null. A non-existent metric column makes the query error,
 // which runQueryOrNull turns into null, so missing probes are skipped without throwing.
-async function evaluateMetricsReceived(
+async function probeMetricsOnce(
   apiKey: string,
-  runId?: string
+  runId: string
 ): Promise<{ value: number; metric: string } | null> {
-  if (!runId) return null; // presence is run-scoped; without a run id there's nothing to match
   for (const column of METRIC_PROBES) {
     const rows = await runQueryOrNull(
       METRICS_DATASET,
@@ -223,6 +222,29 @@ async function evaluateMetricsReceived(
     if (hit) return { value: hit[`MAX(${column})`] as number, metric: column };
   }
   return null;
+}
+
+// Metrics lag traces and logs: the SDK exports them on a periodic cycle (the harness sets a 10s
+// interval) and Honeycomb's metric ingestion takes longer to make a datapoint queryable than the
+// fixed post-traffic flush wait allows. A single query right after traffic therefore reads a
+// present-but-not-yet-queryable metric as a false "no metric datapoints". So poll with a fixed
+// interval up to a budget before concluding none arrived. Only this criterion waits — the other
+// criteria resolve in parallel — and the loop exits as soon as the run's metrics show up.
+const METRICS_POLL_BUDGET_MS = 90_000;
+const METRICS_POLL_INTERVAL_MS = 10_000;
+
+async function evaluateMetricsReceived(
+  apiKey: string,
+  runId?: string
+): Promise<{ value: number; metric: string } | null> {
+  if (!runId) return null; // presence is run-scoped; without a run id there's nothing to match
+  const deadline = Date.now() + METRICS_POLL_BUDGET_MS;
+  for (;;) {
+    const hit = await probeMetricsOnce(apiKey, runId);
+    if (hit) return hit;
+    if (Date.now() >= deadline) return null;
+    await new Promise((r) => setTimeout(r, METRICS_POLL_INTERVAL_MS));
+  }
 }
 
 export interface CriterionResult {
@@ -429,7 +451,7 @@ export async function evaluate(
       pass: metricsResult !== null,
       value: metricsResult
         ? `${metricsResult.metric} (max ${metricsResult.value})`
-        : "no metric datapoints",
+        : "no metric datapoints (polled for late ingestion)",
     },
     logs_received: {
       pass: logsRows !== null && logCount > 0,
