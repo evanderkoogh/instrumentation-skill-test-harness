@@ -172,7 +172,6 @@ start_collector() {
 
   local weaver_grpc weaver_admin col_grpc col_http
   weaver_grpc=$(free_port); weaver_admin=$(free_port)
-  col_grpc=$(free_port);    col_http=$(free_port)
 
   mkdir -p "$LOG_DIR"
   rm -rf "$WEAVER_REPORT_DIR"; mkdir -p "$WEAVER_REPORT_DIR"
@@ -205,17 +204,21 @@ start_collector() {
   local weaver_pid=$!
   echo "$weaver_pid" > "$WEAVER_PID_FILE"
 
-  local waited=0
+  # weaver is a BEST-EFFORT add-on. If it fails to come up we keep going WITHOUT it — the
+  # collector started below is what stamps harness.run_id and fans telemetry to Honeycomb, and
+  # the run-scoped evaluation depends on that. A weaver hiccup (e.g. slow startup under
+  # `run.ts --parallel`) must cost only the weaver criterion, never the whole run's scoping.
+  local waited=0 weaver_ok=1
   until grep -q "OTLP receiver will stop" "$LOG_DIR/weaver.log" 2>/dev/null; do
     sleep 1
     if ! kill -0 "$weaver_pid" 2>/dev/null; then
-      echo "weaver failed to start — check $LOG_DIR/weaver.log. Falling back to direct export." >&2
-      rm -f "$WEAVER_PID_FILE"; return 0
+      echo "weaver failed to start — check $LOG_DIR/weaver.log. Keeping collector; weaver criterion skipped." >&2
+      rm -f "$WEAVER_PID_FILE"; weaver_ok=0; break
     fi
     (( ++waited ))
     if (( waited >= 60 )); then
-      echo "weaver not ready within 60s — check $LOG_DIR/weaver.log. Falling back to direct export." >&2
-      kill "$weaver_pid" 2>/dev/null || true; rm -f "$WEAVER_PID_FILE"; return 0
+      echo "weaver not ready within 60s — check $LOG_DIR/weaver.log. Keeping collector; weaver criterion skipped." >&2
+      kill "$weaver_pid" 2>/dev/null || true; rm -f "$WEAVER_PID_FILE"; weaver_ok=0; break
     fi
   done
 
@@ -243,6 +246,11 @@ start_collector() {
   skill_branch=$(printf '%s' "$skill_branch" | sed -e "$esc")
   skill_git_sha=$(printf '%s' "$skill_git_sha" | sed -e "$esc")
   skill_commit=$(printf '%s' "$skill_commit" | sed -e "$esc")
+
+  # Allocate the collector ports HERE — right before binding, not up front. The weaver
+  # readiness wait above can take seconds; holding a "free" port idle across that window widens
+  # the chance a concurrent `run.ts --parallel` app grabs it first and our bind then fails.
+  col_grpc=$(free_port); col_http=$(free_port)
 
   sed \
     -e "s|%COLLECTOR_GRPC_PORT%|$col_grpc|g" \
@@ -278,10 +286,14 @@ start_collector() {
     fi
   done
 
-  # State for src/weaver.ts to finalize (POST /stop) and read the report.
-  cat > "$WEAVER_STATE_FILE" <<EOF
+  # State for src/weaver.ts to finalize (POST /stop) and read the report — only when weaver
+  # actually came up. If it didn't, we leave no state file (weaver.ts reports the criterion as
+  # skipped) while the collector above still gave the run its Honeycomb + run_id scoping.
+  if [[ "$weaver_ok" == "1" ]]; then
+    cat > "$WEAVER_STATE_FILE" <<EOF
 {"adminPort": $weaver_admin, "reportFile": "$WEAVER_REPORT_DIR/live_check.json", "registry": "$registry_used"}
 EOF
+  fi
 
   # Point the app's OTLP exporter at the local collector. cmd_start launches the app in
   # a subshell that inherits this exported env; the collector forwards to the real
