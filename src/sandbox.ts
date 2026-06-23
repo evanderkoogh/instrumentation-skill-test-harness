@@ -1,4 +1,5 @@
 import { resolve, relative, isAbsolute, sep } from "path";
+import { homedir } from "os";
 
 // Hard filesystem sandbox for the instrumentation agent.
 //
@@ -60,10 +61,16 @@ function cdTargets(command: string): string[] {
 export function makeFsGuard(ctx: GuardContext) {
   const otelDir = resolve(ctx.harnessRoot, "otel");
   const allowedRoots = [ctx.repoDir, otelDir];
+  // The agent's plugins live here. The harness injects the LIVE honeycomb plugin through the
+  // runtime, so the agent never needs to read plugin files directly — and a stale, globally
+  // installed copy under `cache/` would mislead it (and silently invalidate the run) if it did.
+  // Block the whole tree: prevention is durable where deletion isn't (Claude Code re-creates it).
+  const pluginsDir = resolve(homedir(), ".claude", "plugins");
 
-  // Blocked = inside the harness tree but not inside an allowed root. Paths entirely
-  // outside the harness (system libs, dep caches, /tmp, $HOME) are always fine.
+  // Blocked = the agent's plugins tree, OR inside the harness tree but not in an allowed root.
+  // Other paths outside the harness (system libs, dep caches, /tmp, the rest of $HOME) are fine.
   const isBlocked = (absPath: string): boolean => {
+    if (isInside(pluginsDir, absPath)) return true;
     if (!isInside(ctx.harnessRoot, absPath)) return false;
     return !allowedRoots.some((root) => isInside(root, absPath));
   };
@@ -95,6 +102,18 @@ export function makeFsGuard(ctx: GuardContext) {
 }
 
 export function denyReason(target: string): string {
+  // Reading plugin definitions directly (live or, worse, a stale cached copy under
+  // ~/.claude/plugins/cache) is never legitimate — skills and agents reach the agent through
+  // the runtime, not by reading their markdown. Blocking the whole plugins tree also prevents
+  // a stale cached honeycomb plugin from contaminating the run, durably (deleting the cache
+  // doesn't help — Claude Code re-creates it).
+  if (target.includes("/.claude/plugins/")) {
+    return (
+      `Sandbox: reading plugin files at "${target}" is blocked. Use the skills and agents you ` +
+      `were given through the runtime — do not read skill/agent/plugin source files directly. ` +
+      `(Cached plugin copies on disk may be stale and would mislead you.)`
+    );
+  }
   return (
     `Sandbox: access to "${target}" is blocked. You may only read and write within your ` +
     `own checkout directory (and invoke the bundled \`weaver\` in otel/). The test harness's ` +
