@@ -1,6 +1,28 @@
 const HONEYCOMB_BASE = "https://api.honeycomb.io/1";
 const HONEYCOMB_ENV = process.env.HONEYCOMB_ENV ?? "test";
 
+// Honeycomb routes OTLP metrics (regardless of service.name) into a single shared dataset
+// named "metrics" in an Environments & Services environment, distinct from each service's
+// trace/log dataset. The per-run collector stamps harness.run_id onto metric datapoints too
+// (collector.template.yaml metrics pipeline), so we still scope by run inside this shared dataset.
+const METRICS_DATASET = "metrics";
+
+// Candidate metric instruments used to prove "metrics were received" without depending on a
+// single SDK's metric set: HTTP-server latency covers the Python/Go SDKs, JVM/runtime metrics
+// cover the Java agent and Go runtime instrumentation. Probed in order; the first whose
+// datapoints carry THIS run's harness.run_id counts as received. Bare COUNT is rejected on
+// metrics datasets ("aggregate operation not allowed"), so we MAX a metric and group by
+// harness.run_id. Critically, MAX over a zero-match filter still returns a phantom {MAX: 0}
+// row WITHOUT a harness.run_id value — so presence must be judged by the run_id appearing in a
+// returned row, never by getting a number back. A probe whose column doesn't exist is rejected
+// by the API and skipped. (current_semconv separately flags stale attribute names.)
+const METRIC_PROBES = [
+  "http.server.request.duration", // HTTP-server latency: Python/Go SDKs, most language agents
+  "jvm.memory.used",              // JVM runtime: Java agent
+  "process.runtime.go.goroutines", // Go runtime instrumentation
+  "process.runtime.cpu.utilization", // generic process-runtime fallback
+];
+
 interface QuerySpec {
   calculations: Array<{ op: string; column?: string; name?: string }>;
   filters?: Array<{ column: string; op: string; value?: unknown }>;
@@ -179,6 +201,30 @@ async function evaluateDbSystem(
   return null;
 }
 
+// Prove metric datapoints were received for THIS run by querying the shared metrics dataset.
+// runQueryOrNull scopes by harness.run_id; we also break down by it so we can confirm the run's
+// id actually appears in a returned row — MAX alone returns a phantom {MAX: 0} (no run_id) on a
+// zero match, so a bare number is NOT proof. Returns the matching probe (+ its value) or null if
+// no probe's datapoints carry this run_id. A non-existent metric column makes the query error,
+// which runQueryOrNull turns into null, so missing probes are skipped without throwing.
+async function evaluateMetricsReceived(
+  apiKey: string,
+  runId?: string
+): Promise<{ value: number; metric: string } | null> {
+  if (!runId) return null; // presence is run-scoped; without a run id there's nothing to match
+  for (const column of METRIC_PROBES) {
+    const rows = await runQueryOrNull(
+      METRICS_DATASET,
+      { calculations: [{ op: "MAX", column }], breakdowns: ["harness.run_id"] },
+      apiKey,
+      runId
+    );
+    const hit = rows?.find((r) => r["harness.run_id"] === runId);
+    if (hit) return { value: hit[`MAX(${column})`] as number, metric: column };
+  }
+  return null;
+}
+
 export interface CriterionResult {
   pass: boolean;
   value?: unknown;
@@ -194,6 +240,8 @@ export interface HoneycombCriteria {
   rootless_traces: CriterionResult;
   no_explosion: CriterionResult;
   current_semconv: CriterionResult;
+  metrics_received: CriterionResult;
+  logs_received: CriterionResult;
 }
 
 // Full criteria set recorded for a run: the Honeycomb criteria plus the local
@@ -209,7 +257,18 @@ export async function evaluate(
   apiKey: string,
   runId?: string
 ): Promise<HoneycombCriteria> {
-  const [spans, serviceNames, httpRoutes, dbResult, skillVersion, rootless, explosion, columns] =
+  const [
+    spans,
+    serviceNames,
+    httpRoutes,
+    dbResult,
+    skillVersion,
+    rootless,
+    explosion,
+    columns,
+    metricsResult,
+    logsRows,
+  ] =
     await Promise.all([
       runQuery(dataset, { calculations: [{ op: "COUNT" }] }, apiKey, runId),
       runQueryOrNull(
@@ -276,6 +335,18 @@ export async function evaluate(
         runId
       ),
       fetchColumns(dataset, apiKey),
+      // Metrics land in the shared "metrics" dataset; probe HTTP server-duration, run-scoped.
+      evaluateMetricsReceived(apiKey, runId),
+      // Logs land in the service's own dataset alongside spans, tagged meta.signal_type=log.
+      runQueryOrNull(
+        dataset,
+        {
+          calculations: [{ op: "COUNT" }],
+          filters: [{ column: "meta.signal_type", op: "=", value: "log" }],
+        },
+        apiKey,
+        runId
+      ),
     ]);
 
   const totalSpans = (spans[0]?.["COUNT"] as number) ?? 0;
@@ -295,6 +366,7 @@ export async function evaluate(
   );
   const rootlessCount = (rootless?.[0]?.["COUNT"] as number) ?? 0;
   const topSpanCount = (explosion?.[0]?.["COUNT"] as number) ?? 0;
+  const logCount = (logsRows?.[0]?.["COUNT"] as number) ?? 0;
   // current_semconv must be RUN-SCOPED. `columns` is the dataset's column schema, which
   // persists across runs — a legacy column existing there only means *some* past run emitted
   // it, not this one. So take the legacy columns as candidates, then confirm each is actually
@@ -352,6 +424,16 @@ export async function evaluate(
           : deprecatedFound.length === 0
             ? "none"
             : deprecatedFound.map((c) => `${c} → ${DEPRECATED_SEMCONV[c]}`),
+    },
+    metrics_received: {
+      pass: metricsResult !== null,
+      value: metricsResult
+        ? `${metricsResult.metric} (max ${metricsResult.value})`
+        : "no metric datapoints",
+    },
+    logs_received: {
+      pass: logsRows !== null && logCount > 0,
+      value: logsRows === null ? "column absent" : logCount,
     },
   };
 }

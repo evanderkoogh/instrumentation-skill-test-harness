@@ -117,6 +117,38 @@ summary (`tmp/agent-output.<app>.txt`) and checks it communicated the contract:
   …). Setting it from application code does not count — instrumentation reads the variable
   once at init, so in-code mutation is unreliable and the user still has to set it at launch.
 
+### 10. Metrics are arriving — metrics_received
+
+Honeycomb routes OTLP **metrics** (from every service) into a single shared `metrics`
+dataset, separate from each service's trace/log dataset. The per-run collector stamps
+`harness.run_id` onto metric datapoints too, so this is scoped to the current run.
+
+Bare `COUNT` is rejected on metrics datasets, so the criterion proves presence with a
+metrics-legal aggregation (`MAX`) over a small list of probe instruments that span stacks
+(`http.server.request.duration` for Python/Go SDKs, `jvm.memory.used` / runtime metrics for
+the Java agent and Go runtime), grouped by `harness.run_id`:
+```
+MAX: <probe metric>
+BREAKDOWN: harness.run_id
+FILTER: harness.run_id = <run>
+```
+Expect: a returned row whose `harness.run_id` equals this run. **Note:** `MAX` over a
+zero-match filter returns a phantom `{MAX: 0}` row with *no* `harness.run_id`, so presence is
+judged by the run id appearing in a row — never by getting a number back. Fails if no probe's
+datapoints carry this run's id — e.g. the instrumentation set `OTEL_METRICS_EXPORTER=none` or
+never enabled metric export.
+
+### 11. Logs are arriving — logs_received
+
+OTLP **logs** land in the service's own dataset alongside its spans, tagged
+`meta.signal_type = log`. Run-scoped against the app dataset:
+```
+COUNT
+FILTER: meta.signal_type = log
+```
+Expect: non-zero. Fails if the instrumentation emits no logs — e.g. it set
+`OTEL_LOGS_EXPORTER=none` or never wired a logging bridge/handler to OTel.
+
 ## Scoring guide
 
 | Criteria | Weight | Notes |
@@ -127,4 +159,6 @@ summary (`tmp/agent-output.<app>.txt`) and checks it communicated the contract:
 | 7 (no explosion) | Disqualifier | One failure voids quality criteria |
 | 8 (weaver live-check) | High value | Skill must create a registry; telemetry must match it |
 | 9 (env-var contract) | High value | Agent must communicate required env vars to the user |
+| 10 (metrics received) | High value | All three signals must reach Honeycomb, not traces alone |
+| 11 (logs received) | High value | All three signals must reach Honeycomb, not traces alone |
 | App-specific criteria | High value | See apps/<app>/EVALUATION.md |
