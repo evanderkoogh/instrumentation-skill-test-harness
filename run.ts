@@ -9,9 +9,11 @@ import {
   readAppConfig,
   readSkillVersion,
   sleep,
+  startAgentCollector,
+  stopAgentCollector,
   StartupFailure,
 } from "./src/harness.js";
-import { runInstrumentation } from "./src/instrumentation.js";
+import { runInstrumentation, type AgentMetrics } from "./src/instrumentation.js";
 import { evaluate, type EvaluationResults } from "./src/evaluation.js";
 import { runWeaverLiveCheck } from "./src/weaver.js";
 import { evaluateEnvVarOutput } from "./src/envvars.js";
@@ -215,30 +217,47 @@ async function runApp(app: string): Promise<void> {
       });
 
       // --- Instrumentation agent ---
+      // Bring up the agent-telemetry collector first so the SDK's own claude_code.* telemetry is
+      // remapped to gen_ai.* and renders as an agent timeline in Honeycomb. Best-effort: if it
+      // didn't start, the endpoint is undefined and the SDK exports straight to Honeycomb.
+      const agentCollectorEndpoint = startAgentCollector(app, runId);
+      log(
+        agentCollectorEndpoint
+          ? "→ agent telemetry → collector (remapping claude_code.* → gen_ai.*)"
+          : "→ agent collector unavailable — agent telemetry exports straight to Honeycomb"
+      );
       log("→ running instrumentation agent");
-      const agentMetrics = await tracer.startActiveSpan("instrumentation-agent", async (span) => {
-        try {
-          const metrics = await runInstrumentation(app, ingestKey, modelArg, skill);
-          span.setAttributes({
-            "agent.model": metrics.model,
-            "agent.session_id": metrics.session_id,
-            "agent.tool_uses": metrics.tool_uses,
-            "agent.input_tokens": metrics.input_tokens,
-            "agent.output_tokens": metrics.output_tokens,
-            "agent.cache_read_input_tokens": metrics.cache_read_input_tokens,
-            "agent.cache_creation_input_tokens": metrics.cache_creation_input_tokens,
-            "agent.total_tokens": metrics.total_tokens,
-            "agent.cost_usd": metrics.cost.total_usd,
-            "agent.duration_ms": metrics.duration_ms,
-          });
-          return metrics;
-        } catch (err) {
-          span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
-          throw err;
-        } finally {
-          span.end();
-        }
-      });
+      let agentMetrics: AgentMetrics;
+      try {
+        agentMetrics = await tracer.startActiveSpan("instrumentation-agent", async (span) => {
+          try {
+            const metrics = await runInstrumentation(app, ingestKey, runId, agentCollectorEndpoint, modelArg, skill);
+            span.setAttributes({
+              "agent.model": metrics.model,
+              "agent.session_id": metrics.session_id,
+              "agent.tool_uses": metrics.tool_uses,
+              "agent.input_tokens": metrics.input_tokens,
+              "agent.output_tokens": metrics.output_tokens,
+              "agent.cache_read_input_tokens": metrics.cache_read_input_tokens,
+              "agent.cache_creation_input_tokens": metrics.cache_creation_input_tokens,
+              "agent.total_tokens": metrics.total_tokens,
+              "agent.cost_usd": metrics.cost.total_usd,
+              "agent.duration_ms": metrics.duration_ms,
+            });
+            return metrics;
+          } catch (err) {
+            span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
+            throw err;
+          } finally {
+            span.end();
+          }
+        });
+        // Give the SDK exporter + collector a moment to flush the final spans before teardown
+        // (SDK export interval is 1s; the subprocess may still be flushing as query() returns).
+        if (agentCollectorEndpoint) await sleep(3000);
+      } finally {
+        stopAgentCollector(app);
+      }
       const costStr =
         agentMetrics.cost.total_usd < 1
           ? `$${agentMetrics.cost.total_usd.toFixed(4)}`

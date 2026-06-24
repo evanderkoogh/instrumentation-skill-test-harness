@@ -60,6 +60,40 @@ export function harnessStart(app: string, runId?: string): void {
   }
 }
 
+// Bring up the per-run agent-telemetry collector (harness.sh agent-collector-start) and return
+// the OTLP endpoint the SDK exporter should target, or undefined if it couldn't start. The SDK
+// runs in THIS process, so harness.sh publishes its dynamically-allocated port to a file we read
+// back here. Best-effort: any failure returns undefined and the caller exports straight to
+// Honeycomb (un-remapped) instead of aborting the run.
+export function startAgentCollector(app: string, runId: string): string | undefined {
+  const endpointFile = resolve(
+    __dirname,
+    "..",
+    "tmp",
+    `.harness.${app}.agent-collector.endpoint`
+  );
+  const result = spawnSync(HARNESS, [app, "agent-collector-start"], {
+    encoding: "utf8",
+    stdio: ["inherit", "pipe", "pipe"],
+    // Pass the run id so the collector stamps it as gen_ai.conversation.id (collector.agent.template.yaml).
+    env: { ...process.env, HARNESS_RUN_ID: runId },
+  });
+  if (result.status !== 0) return undefined;
+  try {
+    const endpoint = readFileSync(endpointFile, "utf8").trim();
+    return endpoint || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function stopAgentCollector(app: string): void {
+  spawnSync(HARNESS, [app, "agent-collector-stop"], {
+    encoding: "utf8",
+    stdio: ["inherit", "pipe", "pipe"],
+  });
+}
+
 export function readAppConfig(app: string): { dataset: string } {
   const configPath = resolve(__dirname, "..", "apps", app, "config.sh");
   const content = readFileSync(configPath, "utf8");

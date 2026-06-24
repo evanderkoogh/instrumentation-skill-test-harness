@@ -71,6 +71,11 @@ export interface SkillVersion {
 export async function runInstrumentation(
   app: string,
   apiKey: string,
+  runId: string,
+  // When set, the SDK's own OTLP telemetry is exported to this local agent-telemetry collector
+  // (which remaps claude_code.* -> gen_ai.* and forwards to Honeycomb) instead of straight to
+  // Honeycomb. Undefined => the collector is unavailable; fall back to direct export.
+  collectorEndpoint?: string,
   model?: string,
   skill?: SkillVersion
 ): Promise<AgentMetrics> {
@@ -153,9 +158,28 @@ export async function runInstrumentation(
           OTEL_METRICS_EXPORTER: "otlp",
           OTEL_LOGS_EXPORTER: "otlp",
           OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf",
-          OTEL_EXPORTER_OTLP_ENDPOINT: "https://api.honeycomb.io",
-          OTEL_EXPORTER_OTLP_HEADERS: `x-honeycomb-team=${apiKey}`,
+          // Prefer the local agent-telemetry collector (it remaps claude_code.* -> gen_ai.* and
+          // adds its own Honeycomb auth); fall back to exporting straight to Honeycomb if it
+          // didn't come up. Endpoint + protocol must agree — the collector listens http/protobuf.
+          ...(collectorEndpoint
+            ? { OTEL_EXPORTER_OTLP_ENDPOINT: collectorEndpoint, OTEL_EXPORTER_OTLP_HEADERS: "" }
+            : {
+                OTEL_EXPORTER_OTLP_ENDPOINT: "https://api.honeycomb.io",
+                OTEL_EXPORTER_OTLP_HEADERS: `x-honeycomb-team=${apiKey}`,
+              }),
           OTEL_LOG_TOOL_DETAILS: "1",
+          // Opt-in content capture (all default-off; this telemetry goes only to our own
+          // Honeycomb via the agent collector, never to Anthropic). The whole point of this
+          // pipeline is insight into exactly what the agents do, so capture the lot:
+          //   - TOOL_CONTENT: full tool input + output bodies as `tool.output` span events
+          //     (file contents read/written, Bash output), 60 KB cap. Needs the enhanced beta
+          //     (set above).
+          //   - RAW_API_BODIES: the actual Messages API request/response JSON — prompts,
+          //     conversation history, and model responses — as log events, 60 KB cap inline.
+          //   - USER_PROMPTS: the user-prompt text (our instrument prompt).
+          OTEL_LOG_TOOL_CONTENT: "1",
+          OTEL_LOG_RAW_API_BODIES: "1",
+          OTEL_LOG_USER_PROMPTS: "1",
           // Shorten export intervals so spans flush before the process exits
           OTEL_TRACES_EXPORT_INTERVAL: "1000",
           OTEL_LOGS_EXPORT_INTERVAL: "1000",
@@ -163,6 +187,16 @@ export async function runInstrumentation(
           OTEL_SERVICE_NAME: `${app}-instrumentation`,
           OTEL_RESOURCE_ATTRIBUTES: [
             `app=${app}`,
+            // The SDK's built-in telemetry emits a `session.id` but never gen_ai.conversation.id,
+            // which is what Honeycomb's agent view groups a conversation by. The agent-telemetry
+            // collector normally stamps this (and does the full claude_code.* -> gen_ai.* remap);
+            // we ALSO set it here so that on the fallback path — collector unavailable, exporting
+            // straight to Honeycomb — the run still groups into one conversation. One harness run
+            // is exactly one agent conversation, so the run id is the right grain. Matches the
+            // runId used as harness.run_id elsewhere. Left un-encoded (unlike the skill.* entries
+            // below): runId is always baggage-safe (`<app>-<ISO timestamp>`), so the raw value
+            // round-trips identically whether or not the SDK percent-decodes resource attrs.
+            `gen_ai.conversation.id=${runId}`,
             skill ? `skill.branch=${encodeURIComponent(skill.branch)}` : "",
             skill ? `skill.sha=${encodeURIComponent(skill.sha)}` : "",
             skill ? `skill.content_hash=${encodeURIComponent(skill.contentHash)}` : "",

@@ -46,6 +46,14 @@ PID_FILE="$TMP_DIR/.harness.$APP.pids"
 # app-scoped so concurrent runs get isolated ports, configs, and report files.
 COLLECTOR_PID_FILE="$TMP_DIR/.harness.$APP.collector.pid"
 COLLECTOR_CONFIG="$TMP_DIR/.harness.$APP.collector.yaml"
+# Per-run AGENT-telemetry collector (see agent_collector_start / agent_collector_stop). It
+# runs during the instrument/agent phase — earlier and separate from the app collector above —
+# and remaps the SDK's claude_code.* telemetry into the GenAI conventions. The endpoint file
+# carries its dynamically-allocated OTLP URL back to run.ts (the SDK runs in run.ts's own
+# process, so it can't be handed the port via exported env the way the app is).
+AGENT_COLLECTOR_PID_FILE="$TMP_DIR/.harness.$APP.agent-collector.pid"
+AGENT_COLLECTOR_CONFIG="$TMP_DIR/.harness.$APP.agent-collector.yaml"
+AGENT_COLLECTOR_ENDPOINT_FILE="$TMP_DIR/.harness.$APP.agent-collector.endpoint"
 WEAVER_PID_FILE="$TMP_DIR/.harness.$APP.weaver.pid"
 WEAVER_STATE_FILE="$TMP_DIR/.harness.$APP.weaver.json"
 WEAVER_REPORT_DIR="$LOG_DIR/weaver-report"
@@ -335,6 +343,85 @@ stop_collector() {
   rm -f "$WEAVER_STATE_FILE"
 }
 
+# Bring up the per-run AGENT-telemetry collector (dispatched as `agent-collector-start`).
+# It receives the Claude Agent SDK's own OTLP telemetry, remaps the claude_code.* spans into
+# the GenAI semantic conventions (collector.agent.template.yaml), and forwards to Honeycomb so
+# the run renders as an agent timeline. BEST-EFFORT: on any problem we warn, write no endpoint
+# file, and return 0 — run.ts then falls back to exporting the agent telemetry straight to
+# Honeycomb (un-remapped) rather than aborting the run.
+harness_agent_collector_start() {
+  local col_bin="$SCRIPT_DIR/otel/otelcol-contrib"
+  local template="$SCRIPT_DIR/collector.agent.template.yaml"
+  # Stale endpoint from a prior run must never be read as this run's: clear it up front and
+  # only (re)write it once the collector is confirmed listening.
+  rm -f "$AGENT_COLLECTOR_ENDPOINT_FILE"
+  if [[ ! -x "$col_bin" || ! -f "$template" ]]; then
+    echo "agent-telemetry collector tooling unavailable (run 'download-tools') — agent telemetry will export straight to Honeycomb." >&2
+    return 0
+  fi
+
+  # Real Honeycomb destination, from the harness env (.env is sourced at the top of this script).
+  local hc_endpoint="${OTEL_EXPORTER_OTLP_ENDPOINT:-https://api.honeycomb.io}"
+  local hc_key=""
+  if [[ -n "${OTEL_EXPORTER_OTLP_HEADERS:-}" ]]; then
+    hc_key=$(printf '%s' "$OTEL_EXPORTER_OTLP_HEADERS" | sed -E 's/.*x-honeycomb-team=([^,]+).*/\1/')
+  fi
+
+  # Run id (groups the conversation) provided by run.ts; fall back to an app+timestamp id if
+  # invoked standalone. Agent name matches the SDK's OTEL_SERVICE_NAME (src/instrumentation.ts).
+  local run_id="${HARNESS_RUN_ID:-$APP-$(date +%s)}"
+  local agent_name="$APP-instrumentation"
+
+  mkdir -p "$LOG_DIR"
+  local col_grpc col_http
+  col_grpc=$(free_port); col_http=$(free_port)
+
+  sed \
+    -e "s|%COLLECTOR_GRPC_PORT%|$col_grpc|g" \
+    -e "s|%COLLECTOR_HTTP_PORT%|$col_http|g" \
+    -e "s|%HONEYCOMB_ENDPOINT%|$hc_endpoint|g" \
+    -e "s|%API_KEY%|$hc_key|g" \
+    -e "s|%RUN_ID%|$run_id|g" \
+    -e "s|%AGENT_NAME%|$agent_name|g" \
+    "$template" > "$AGENT_COLLECTOR_CONFIG"
+
+  echo "Starting agent-telemetry collector (agent OTLP http:$col_http -> Honeycomb, claude_code.* -> gen_ai.*)..."
+  "$col_bin" --config "$AGENT_COLLECTOR_CONFIG" > "$LOG_DIR/agent-collector.log" 2>&1 &
+  local col_pid=$!
+  echo "$col_pid" > "$AGENT_COLLECTOR_PID_FILE"
+
+  local waited=0
+  until port_in_use "$col_http"; do
+    sleep 1
+    if ! kill -0 "$col_pid" 2>/dev/null; then
+      echo "Agent-telemetry collector failed to start — check $LOG_DIR/agent-collector.log. Falling back to direct export." >&2
+      rm -f "$AGENT_COLLECTOR_PID_FILE" "$AGENT_COLLECTOR_CONFIG"
+      return 0
+    fi
+    (( ++waited ))
+    if (( waited >= 20 )); then
+      echo "Agent-telemetry collector not ready within 20s — check $LOG_DIR/agent-collector.log. Falling back to direct export." >&2
+      return 0
+    fi
+  done
+
+  # Listening — publish the endpoint for run.ts to point the SDK exporter at.
+  echo "http://127.0.0.1:$col_http" > "$AGENT_COLLECTOR_ENDPOINT_FILE"
+  echo "Agent OTLP export -> http://127.0.0.1:$col_http (remap to gen_ai.* -> Honeycomb)"
+}
+
+harness_agent_collector_stop() {
+  if [[ -f "$AGENT_COLLECTOR_PID_FILE" ]]; then
+    local pid; pid=$(cat "$AGENT_COLLECTOR_PID_FILE")
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "Stopping agent-telemetry collector (PID $pid)..."
+      kill "$pid"
+    fi
+    rm -f "$AGENT_COLLECTOR_PID_FILE" "$AGENT_COLLECTOR_CONFIG"
+  fi
+  rm -f "$AGENT_COLLECTOR_ENDPOINT_FILE"
+}
+
 # --- Generic implementations (harness_*) ---
 # Apps override these by defining cmd_<name>() in their config.sh.
 
@@ -492,8 +579,11 @@ harness_start() {
 }
 
 harness_stop() {
-  # Always tear down the capture collector, even if the app PID file is gone.
+  # Always tear down both collectors, even if the app PID file is gone. The agent collector
+  # is normally stopped by run.ts right after the agent finishes; this covers the kill /
+  # mid-run-failure path where it may still be alive.
   stop_collector
+  harness_agent_collector_stop
   if [[ ! -f "$PID_FILE" ]]; then
     echo "No PID file found — servers may not be running."
     return

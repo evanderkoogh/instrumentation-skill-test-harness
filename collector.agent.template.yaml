@@ -1,0 +1,116 @@
+# Per-run AGENT-telemetry collector — rendered by harness.sh agent_collector_start()
+# with `sed` (%PLACEHOLDER% substitution, same mechanism as collector.template.yaml).
+#
+# This sits between the instrumentation AGENT (the Claude Agent SDK subprocess driven by
+# src/instrumentation.ts) and Honeycomb. The SDK's built-in telemetry emits claude_code.*
+# spans (claude_code.interaction / .llm_request / .tool) with only a partial set of GenAI
+# attributes and no gen_ai.conversation.id — so Honeycomb's agent view can't group a run
+# into one conversation. This collector remaps that telemetry into the GenAI semantic
+# conventions so the run shows up as a proper agent timeline.
+#
+#   agent SDK --OTLP/http--> otelcol-contrib --(remap claude_code.* -> gen_ai.*)--> Honeycomb
+#
+# Unlike the app collector (collector.template.yaml) there is NO weaver fan-out: this is the
+# harness observing its OWN agent, not the instrumentation under test. The remap recipe
+# follows Honeycomb's "Remapping existing telemetry" guide for Claude Code.
+#
+# Ports are dynamically allocated per run so concurrent app runs never collide.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 127.0.0.1:%COLLECTOR_GRPC_PORT%
+      http:
+        endpoint: 127.0.0.1:%COLLECTOR_HTTP_PORT%
+
+processors:
+  # Identity attributes stamped on every signal (traces, metrics, logs). Resource attributes
+  # are denormalised onto every span/metric/log in Honeycomb's storage model, so a query or
+  # the agent view sees these on each span — the same mechanism the app collector relies on
+  # for harness.run_id.
+  #   - gen_ai.conversation.id: groups the whole run (conductor + every sub-agent, which all
+  #     share this one SDK subprocess) into a single conversation. We use the harness runId
+  #     rather than the SDK's session.id (Honeycomb's example maps session.id) so the agent
+  #     view, the app telemetry, and the runs.jsonl record all key off the same value.
+  #   - gen_ai.agent.name: required by the agent view to identify the agent.
+  #   - harness.run_id: keeps agent telemetry correlatable with the rest of the run.
+  resource/agent:
+    attributes:
+      - key: gen_ai.conversation.id
+        value: "%RUN_ID%"
+        action: upsert
+      - key: gen_ai.agent.name
+        value: "%AGENT_NAME%"
+        action: upsert
+      - key: harness.run_id
+        value: "%RUN_ID%"
+        action: upsert
+
+  # Remap Claude Code's vendor span shape into the GenAI semantic conventions. Mirrors
+  # Honeycomb's documented recipe; error_mode: ignore so a span missing an expected source
+  # attribute is passed through untouched rather than dropping the batch.
+  transform/genai:
+    error_mode: ignore
+    trace_statements:
+      - context: span
+        statements:
+          - set(name, "invoke_agent %AGENT_NAME%") where name == "claude_code.interaction"
+          - set(attributes["gen_ai.operation.name"], "invoke_agent") where name == "invoke_agent %AGENT_NAME%"
+
+          - set(name, Concat(["chat ", attributes["gen_ai.request.model"]], "")) where name == "claude_code.llm_request" and attributes["gen_ai.request.model"] != nil
+          - set(attributes["gen_ai.operation.name"], "chat") where IsMatch(name, "^chat ")
+
+          - set(name, Concat(["execute_tool ", attributes["tool_name"]], "")) where name == "claude_code.tool" and attributes["tool_name"] != nil
+          - set(attributes["gen_ai.operation.name"], "execute_tool") where IsMatch(name, "^execute_tool ")
+          - set(attributes["gen_ai.tool.name"], attributes["tool_name"]) where IsMatch(name, "^execute_tool ")
+
+          - set(attributes["gen_ai.usage.input_tokens"], attributes["input_tokens"]) where attributes["input_tokens"] != nil
+          - set(attributes["gen_ai.usage.output_tokens"], attributes["output_tokens"]) where attributes["output_tokens"] != nil
+          - set(attributes["gen_ai.usage.cache_read_input_tokens"], attributes["cache_read_tokens"]) where attributes["cache_read_tokens"] != nil
+          - set(attributes["gen_ai.usage.cache_creation_input_tokens"], attributes["cache_creation_tokens"]) where attributes["cache_creation_tokens"] != nil
+
+          # Tool INPUT into the conventional gen_ai.tool.call.arguments field. Claude Code does
+          # NOT emit a single `tool_input` SPAN attribute (Honeycomb's generic recipe assumes one)
+          # — and no SDK version through 2.1.187 does. The input lives in per-tool SPAN attributes,
+          # populated only when OTEL_LOG_TOOL_DETAILS=1 (set by src/instrumentation.ts):
+          # `full_command` for Bash, `file_path` for the file tools. One span carries one of them,
+          # so these two statements are mutually exclusive; add a line here as new tools surface
+          # their own input attribute.
+          - set(attributes["gen_ai.tool.call.arguments"], attributes["full_command"]) where IsMatch(name, "^execute_tool ") and attributes["full_command"] != nil
+          - set(attributes["gen_ai.tool.call.arguments"], attributes["file_path"]) where IsMatch(name, "^execute_tool ") and attributes["file_path"] != nil
+          # Tool RESULT is intentionally not mapped: Claude Code never puts tool output on a span
+          # attribute — with OTEL_LOG_TOOL_CONTENT=1 it emits a `tool.output` span EVENT instead,
+          # which OTTL can't hoist onto the parent span. The result is in that event, not here.
+
+exporters:
+  otlphttp/honeycomb:
+    endpoint: %HONEYCOMB_ENDPOINT%
+    headers:
+      x-honeycomb-team: %API_KEY%
+
+service:
+  telemetry:
+    logs:
+      level: warn
+    # Disable the collector's own Prometheus metrics endpoint (hardcoded :8888): under
+    # `run.ts --parallel` every app's agent collector would otherwise fight over that one
+    # port and all but one would die on startup. We don't scrape these. (Same rationale as
+    # collector.template.yaml.)
+    metrics:
+      level: none
+  pipelines:
+    # Only traces are remapped — that's what the agent timeline is built from. Metrics and
+    # logs are forwarded with just the identity attributes stamped on, so they stay
+    # correlatable without a vendor-specific remap.
+    traces:
+      receivers: [otlp]
+      processors: [transform/genai, resource/agent]
+      exporters: [otlphttp/honeycomb]
+    metrics:
+      receivers: [otlp]
+      processors: [resource/agent]
+      exporters: [otlphttp/honeycomb]
+    logs:
+      receivers: [otlp]
+      processors: [resource/agent]
+      exporters: [otlphttp/honeycomb]
