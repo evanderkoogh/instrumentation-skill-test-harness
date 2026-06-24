@@ -1,5 +1,5 @@
 # Per-run AGENT-telemetry collector — rendered by harness.sh agent_collector_start()
-# with `sed` (%PLACEHOLDER% substitution, same mechanism as collector.template.yaml).
+# with `sed` (%PLACEHOLDER% substitution, same mechanism as collector.run.template.yaml).
 #
 # This sits between the instrumentation AGENT (the Claude Agent SDK subprocess driven by
 # src/instrumentation.ts) and Honeycomb. The SDK's built-in telemetry emits claude_code.*
@@ -10,7 +10,7 @@
 #
 #   agent SDK --OTLP/http--> otelcol-contrib --(remap claude_code.* -> gen_ai.*)--> Honeycomb
 #
-# Unlike the app collector (collector.template.yaml) there is NO weaver fan-out: this is the
+# Unlike the app collector (collector.run.template.yaml) there is NO weaver fan-out: this is the
 # harness observing its OWN agent, not the instrumentation under test. The remap recipe
 # follows Honeycomb's "Remapping existing telemetry" guide for Claude Code.
 #
@@ -95,7 +95,7 @@ service:
     # Disable the collector's own Prometheus metrics endpoint (hardcoded :8888): under
     # `run.ts --parallel` every app's agent collector would otherwise fight over that one
     # port and all but one would die on startup. We don't scrape these. (Same rationale as
-    # collector.template.yaml.)
+    # collector.run.template.yaml.)
     metrics:
       level: none
   pipelines:

@@ -13,7 +13,7 @@ fi
 
 # Harness-tracking attributes (harness.run_id, service.instrumentation_skill.*) are NOT set
 # here — the fan-out collector stamps them onto the Honeycomb-bound copy only, keeping the
-# weaver pipeline's view of the telemetry clean (see collector.template.yaml).
+# weaver pipeline's view of the telemetry clean (see collector.run.template.yaml).
 
 exec java \
   -javaagent:"$SPRING_INSTRUMENT" \

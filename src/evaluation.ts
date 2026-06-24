@@ -4,7 +4,7 @@ const HONEYCOMB_ENV = process.env.HONEYCOMB_ENV ?? "test";
 // Honeycomb routes OTLP metrics (regardless of service.name) into a single shared dataset
 // named "metrics" in an Environments & Services environment, distinct from each service's
 // trace/log dataset. The per-run collector stamps harness.run_id onto metric datapoints too
-// (collector.template.yaml metrics pipeline), so we still scope by run inside this shared dataset.
+// (collector.run.template.yaml metrics pipeline), so we still scope by run inside this shared dataset.
 const METRICS_DATASET = "metrics";
 
 // Candidate metric instruments used to prove "metrics were received" without depending on a
@@ -84,7 +84,7 @@ async function runQuery(
 
   // Scope to this run only — the dataset is shared across runs, so without this filter a
   // query would pick up spans (and persistent columns) from prior runs. harness.run_id is
-  // stamped on every span by the per-run collector (collector.template.yaml).
+  // stamped on every span by the per-run collector (collector.run.template.yaml).
   const scoped: QuerySpec = runId
     ? { ...spec, filters: [...(spec.filters ?? []), { column: "harness.run_id", op: "=", value: runId }] }
     : spec;

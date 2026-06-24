@@ -38,7 +38,7 @@ export function harnessStart(app: string, runId?: string): void {
     encoding: "utf8",
     stdio: ["inherit", "pipe", "pipe"],
     // Pass the run id so the collector stamps harness.run_id on every span
-    // (collector.template.yaml), letting the eval scope its queries to this run.
+    // (collector.run.template.yaml), letting the eval scope its queries to this run.
     env: runId ? { ...process.env, HARNESS_RUN_ID: runId } : process.env,
   });
   if (result.status !== 0) {

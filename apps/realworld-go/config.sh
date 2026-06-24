@@ -54,7 +54,7 @@ cmd_start() {
 
   # Harness-tracking attributes (harness.run_id, service.instrumentation_skill.*) are NOT
   # set on the app — the fan-out collector stamps them onto the Honeycomb-bound copy only,
-  # keeping the weaver pipeline's view of the telemetry clean (see collector.template.yaml).
+  # keeping the weaver pipeline's view of the telemetry clean (see collector.run.template.yaml).
   # NOTE: service.name is intentionally NOT set here. The instrumentation skill is
   # responsible for hardcoding service.name in the application's OTel Resource so that
   # spans land in the "$APP_DATASET" dataset. The evaluation verifies this (service_name

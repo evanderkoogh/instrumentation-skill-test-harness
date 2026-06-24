@@ -13,7 +13,7 @@ src/
   harness.ts          # Helpers that wrap harness.sh commands
   metrics.ts          # Run record persistence (runs.jsonl) and summary printing
 harness.sh            # Low-level step runner: reset, build, bootstrap, start, stop, traffic, instrument
-collector.template.yaml  # Per-run OTel Collector config (fan-out to Honeycomb + weaver live-check)
+collector.run.template.yaml  # Per-run OTel Collector config (fan-out to Honeycomb + weaver live-check)
 otel/                 # Downloaded tooling (gitignored): Java agent, weaver, otelcol-contrib
 apps/
   <app>/              # One directory per target app (e.g. broadleaf, realworld-go, beaverhabits)

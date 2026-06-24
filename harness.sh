@@ -165,7 +165,7 @@ start_collector() {
   [[ "$HARNESS_WEAVER_CAPTURE" == "1" ]] || return 0
   local col_bin="$SCRIPT_DIR/otel/otelcol-contrib"
   local weaver_bin="$SCRIPT_DIR/otel/weaver"
-  local template="$SCRIPT_DIR/collector.template.yaml"
+  local template="$SCRIPT_DIR/collector.run.template.yaml"
   if [[ ! -x "$col_bin" || ! -x "$weaver_bin" || ! -f "$template" ]]; then
     echo "weaver-capture tooling unavailable (run 'download-tools') — exporting straight to Honeycomb." >&2
     return 0

@@ -65,7 +65,7 @@ cmd_start() {
   # "$APP_DATASET" dataset. The evaluation verifies this (service_name criterion).
   # Harness-tracking attributes (harness.run_id, service.instrumentation_skill.*) are NOT
   # set on the app — the fan-out collector stamps them onto the Honeycomb-bound copy only,
-  # keeping the weaver pipeline's view of the telemetry clean (see collector.template.yaml).
+  # keeping the weaver pipeline's view of the telemetry clean (see collector.run.template.yaml).
 
   echo "Starting beaverhabits on port $APP_HTTP_PORT..."
   (
