@@ -78,6 +78,11 @@ export async function runInstrumentation(
   const prompt = readFileSync(promptPath, "utf8");
   const harnessRoot = resolve(__dirname, "..");
   const repoDir = resolve(harnessRoot, "checkouts", app);
+  // The honeycomb plugin root the SDK loads skills/agents from. Exported as CLAUDE_PLUGIN_ROOT
+  // (env, below) so the runtime resolves ${CLAUDE_PLUGIN_ROOT} in skill bodies — e.g. the
+  // language-config `references/<lang>.md` paths — the way real Claude Code does, instead of the
+  // agent hunting the filesystem with `find /`.
+  const pluginRoot = resolve(harnessRoot, "agent-skill", "honeycomb");
 
   // Hard sandbox: confine the agent's filesystem access to its own checkout (+ the bundled
   // weaver in otel/) so it can't read the harness's eval code / EVALUATION.md and overfit
@@ -127,7 +132,7 @@ export async function runInstrumentation(
         // nothing itself; everything it exercises is shipped in the plugin.
         allowedTools: ["Read", "Write", "Edit", "Bash", "Agent", "Task"],
         skills: "all",
-        plugins: [{ type: "local", path: resolve(harnessRoot, "agent-skill", "honeycomb") }],
+        plugins: [{ type: "local", path: pluginRoot }],
         cwd: repoDir,
         maxTurns: 150,
         hooks: {
@@ -136,6 +141,9 @@ export async function runInstrumentation(
         ...(model ? { model } : {}),
         env: {
           ...process.env,           // inherit auth tokens and PATH
+          // Plugin root, so the runtime resolves ${CLAUDE_PLUGIN_ROOT} in skill bodies (e.g. the
+          // language-config references/<lang>.md) rather than the agent searching for it.
+          CLAUDE_PLUGIN_ROOT: pluginRoot,
           // Make the bundled `weaver` binary callable by the agent (skill step
           // "Create weaver registry" has it run `weaver registry check` to self-validate).
           PATH: `${resolve(__dirname, "..", "otel")}:${process.env.PATH ?? ""}`,
