@@ -94,11 +94,14 @@ export function stopAgentCollector(app: string): void {
   });
 }
 
-export function readAppConfig(app: string): { dataset: string } {
+export function readAppConfig(app: string): { dataset: string; language: string } {
   const configPath = resolve(__dirname, "..", "apps", app, "config.sh");
   const content = readFileSync(configPath, "utf8");
-  const match = content.match(/APP_DATASET="([^"]+)"/);
-  return { dataset: match?.[1] ?? app };
+  const dataset = content.match(/APP_DATASET="([^"]+)"/)?.[1] ?? app;
+  // APP_OTEL_AGENT_TYPE is the app's language/runtime (python|go|java|node) — it selects the
+  // containerized agent image (src/container.ts). Falls back to "node" if unset.
+  const language = content.match(/APP_OTEL_AGENT_TYPE="([^"]+)"/)?.[1] ?? "node";
+  return { dataset, language };
 }
 
 export function readSkillVersion(app: string): {

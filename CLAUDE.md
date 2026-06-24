@@ -87,6 +87,56 @@ This orchestrates the complete cycle automatically:
 
 > **Note on bootstrap:** Some apps persist `bootstrap` state outside the checkout (e.g. a seeded database under `/tmp`), which can survive session restarts but be cleared on system reboot. If `start` fails with a schema/setup error, run `./harness.sh <app> bootstrap` manually before re-running.
 
+## Containerized agent runs (`HARNESS_CONTAINERIZE`)
+
+By default the instrumentation agent (step 5) runs **in-process on the host**, so its Bash shares the
+host process table, port space, and `/tmp` with the harness's own scoring weaver/collector and any
+concurrent `--parallel` runs. That makes the agent burn turns on `ps`/`lsof`/`kill` disambiguation
+(*"is this weaver mine or the harness's?"*) — pure overhead that the portable skill can't be taught
+to avoid without harness-specific instructions.
+
+Set **`HARNESS_CONTAINERIZE=1`** to run **only the agent step** inside a Docker container instead. The
+images share a base layer (`harness-agent-base`: Node runtime, weaver, baked harness code, Node deps);
+each language image (`harness-agent-{python,go,java}`) just adds its toolchain. **Build the base first**,
+then the language image(s) — rebuild the base whenever harness code or deps change:
+
+```
+docker build -f docker/agent-base.Dockerfile   -t harness-agent-base   .   # base: one-time / on harness-code change
+docker build -f docker/agent-python.Dockerfile -t harness-agent-python .   # + uv
+docker build -f docker/agent-go.Dockerfile     -t harness-agent-go     .   # + Go toolchain (CGO_ENABLED=1)
+docker build -f docker/agent-java.Dockerfile   -t harness-agent-java   .   # + JDK 17 + Maven + OTel java agent jar
+HARNESS_CONTAINERIZE=1 npx tsx run.ts beaverhabits   # python · realworld-go (go) · broadleaf (java)
+```
+
+The container has its own PID + network namespace, so the skill's generic process/port commands only
+ever see the agent's own world. Everything else (`reset`/`build`/`instrument`, then `start`/`traffic`/
+`evaluate`/weaver scoring/record) still runs on the host, unchanged — only `runInstrumentation()` is
+relocated. Supported for **all three apps** (Python/Go/Java); a new app's language just needs a
+`harness-agent-<lang>` image. `node` apps would need one too.
+
+How it fits together:
+- **`src/container.ts`** launches `docker run` (replacing the in-process call in `run.ts`); **`src/run-agent.ts`** is the in-container entrypoint that calls the same `runInstrumentation()` and writes `AgentMetrics` to `tmp/.agent-metrics.<app>.json`, which the host reads back.
+- **Image selection:** `src/container.ts` picks `harness-agent-<lang>` from the app's `APP_OTEL_AGENT_TYPE` (surfaced via `readAppConfig` in `src/harness.ts`). `HARNESS_AGENT_IMAGE` overrides as an escape hatch.
+- The image bakes the harness code at **`/harness`** so paths resolve exactly as on the host (`harnessRoot=/harness`, `repoDir=/harness/checkouts/<app>`, `pluginRoot=/harness/agent-skill/honeycomb`) — `src/instrumentation.ts` and `src/sandbox.ts` run **unchanged**.
+- **Mounts:** the checkout (RW, so edits land on the host checkout the host later scores), `tmp/` (RW), and the skill tree (RO at `/harness/agent-skill/honeycomb`). The eval "answer key" (`src/evaluation.ts`, `weaver.ts`, `envvars.ts`, `EVALUATION.md`, `apps/`) is **never copied into the image** (see `.dockerignore`), so it's physically absent — stronger than the host's `PreToolUse` sandbox.
+- **Writable HOME:** `--user <host-uid>` leaves the container with no home dir, so `HOME` is pointed at `/harness/tmp/.home-<app>` (under the bind-mounted, host-uid-owned `tmp/`, pre-created host-side) — giving Go (`GOPATH`/`GOCACHE`), Maven (`~/.m2`), and uv a writable, host-persisted cache location.
+- **Per-language / per-app extra mounts:** the **java** image mounts the host `~/.m2` (RW) into `HOME/.m2` so Maven doesn't re-download ~1 GB each run; **broadleaf** also mounts (a) the host-seeded `/tmp/broadleaf-hsqldb` (run `./harness.sh broadleaf bootstrap` first) so the agent's verification boot finds the correct schema, and (b) the host's cached Solr distribution — Broadleaf downloads ~225 MB of Solr from the rate-limited archive.apache.org into `${java.io.tmpdir}/solr-<ver>` on first boot, so `src/container.ts` binds the host's copy (`os.tmpdir()/solr-<ver>`, where prior host runs already cached it) to the container's `/tmp/solr-<ver>`. Note `java.io.tmpdir` is the per-user `$TMPDIR` on the macOS host but `/tmp` in the Linux container — hence the cross-path mount.
+- **Networking:** under the flag the agent-telemetry collector binds `0.0.0.0` (not `127.0.0.1`) and `src/container.ts` rewrites its endpoint host to `host.docker.internal`, so the SDK's own telemetry still reaches the host collector → Honeycomb. The container publishes **no** ports, so the agent's own app boots (broadleaf's HTTP/HTTPS/HSQLDB:9001 etc.) bind only inside its netns and can't collide with the host.
+- **weaver:** the base image ships a statically-linked **musl** Linux weaver (the host `otel/` weaver is a macOS binary and isn't mounted; the `latest` gnu build needs a newer glibc than the base image).
+- **Go (cgo):** realworld-go's SQLite driver (`mattn/go-sqlite3`) is cgo, so the Go image sets `CGO_ENABLED=1` and relies on `build-essential` (gcc) from the base.
+- **Java agent jar:** the skill downloads the latest OTel java agent itself (host parity); the java image also **bakes a copy** at `/opt/otel/opentelemetry-javaagent.jar` as an offline fallback.
+- **Memory (broadleaf):** broadleaf needs GB-scale RAM (site + admin JVMs, `MAVEN_OPTS=-Xmx1g`); ensure the Docker Desktop VM has **≥6-8 GB** before a broadleaf run.
+
+**Auth requirement:** the SDK authenticates from `run.ts`'s environment, and `src/container.ts`
+forwards the credential vars **by name** (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+`CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_BASE_URL`). So `ANTHROPIC_API_KEY` (or equivalent) must be
+**exported in the shell that launches `run.ts`**. If you authenticate via a Claude Code OAuth
+credentials file (`~/.claude/.credentials.json`) rather than an env var, the container won't see it —
+mount that file in (it isn't, currently).
+
+Editing harness code that the agent step uses (`src/instrumentation.ts`, `sandbox.ts`, `pricing.ts`,
+`run-agent.ts`) requires a `docker build` to take effect, since the image bakes those files.
+
 ## harness.sh — Individual Steps
 
 `harness.sh` exposes each step individually for debugging. `run.ts` calls these internally; you rarely need to invoke them directly. Two env vars are required: `OTEL_EXPORTER_OTLP_HEADERS` (ingest key) and `HONEYCOMB_QUERY_API_KEY` (query key with Query Data permission) — both read from `.env`.

@@ -1,0 +1,33 @@
+# Build context for docker/agent-python.Dockerfile. The image bakes only the harness CODE the agent
+# runtime needs; everything heavy, host-specific, or scoring-related is excluded.
+
+# Heavy / host-specific / regenerated
+node_modules
+checkouts
+otel
+logs
+reports
+tmp
+runs.jsonl
+.git
+
+# Mounted at runtime, not baked
+agent-skill
+
+# The eval "answer key" — must be physically absent from the agent container so it cannot be read
+# even if the sandbox hook were bypassed. None of these are imported by the run-agent → instrumentation
+# code path, so the image still builds and runs without them.
+EVALUATION.md
+apps
+src/evaluation.ts
+src/weaver.ts
+src/envvars.ts
+
+# Not needed inside the container (host-only orchestration / config)
+run.ts
+harness.sh
+ports.sh
+collector.run.template.yaml
+collector.agent.template.yaml
+docker
+.env

@@ -19,9 +19,9 @@ receivers:
   otlp:
     protocols:
       grpc:
-        endpoint: 127.0.0.1:%COLLECTOR_GRPC_PORT%
+        endpoint: %COLLECTOR_BIND%:%COLLECTOR_GRPC_PORT%
       http:
-        endpoint: 127.0.0.1:%COLLECTOR_HTTP_PORT%
+        endpoint: %COLLECTOR_BIND%:%COLLECTOR_HTTP_PORT%
 
 processors:
   # Identity attributes stamped on every signal (traces, metrics, logs). Resource attributes

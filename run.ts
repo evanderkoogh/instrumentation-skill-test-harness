@@ -14,6 +14,7 @@ import {
   StartupFailure,
 } from "./src/harness.js";
 import { runInstrumentation, type AgentMetrics } from "./src/instrumentation.js";
+import { runInstrumentationInContainer } from "./src/container.js";
 import { evaluate, type EvaluationResults } from "./src/evaluation.js";
 import { runWeaverLiveCheck } from "./src/weaver.js";
 import { evaluateEnvVarOutput } from "./src/envvars.js";
@@ -231,7 +232,14 @@ async function runApp(app: string): Promise<void> {
       try {
         agentMetrics = await tracer.startActiveSpan("instrumentation-agent", async (span) => {
           try {
-            const metrics = await runInstrumentation(app, ingestKey, runId, agentCollectorEndpoint, modelArg, skill);
+            // Opt-in: run the agent step inside a Docker container so its Bash (ps/lsof/kill, its own
+            // weaver, app starts) is isolated from the harness's scoring weaver/collector and sibling
+            // --parallel runs. Same runInstrumentation underneath; only the namespace differs. Host
+            // execution stays the default + fallback.
+            const metrics =
+              process.env.HARNESS_CONTAINERIZE === "1"
+                ? await runInstrumentationInContainer(app, ingestKey, runId, agentCollectorEndpoint, modelArg, skill)
+                : await runInstrumentation(app, ingestKey, runId, agentCollectorEndpoint, modelArg, skill);
             span.setAttributes({
               "agent.model": metrics.model,
               "agent.session_id": metrics.session_id,

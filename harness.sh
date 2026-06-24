@@ -138,6 +138,10 @@ find_registry() {
   manifest=$(find "$REPO_DIR" \( -name manifest.yaml -o -name registry_manifest.yaml \) \
     -not -path '*/node_modules/*' -not -path '*/.git/*' 2>/dev/null | head -1)
   [[ -n "$manifest" ]] && dirname "$manifest"
+  # Best-effort lookup: a missing manifest is normal (caller falls back to upstream-semconv). Without
+  # this explicit success, an empty result makes the final [[ -n ]] test the function's exit status
+  # (1), which under `set -e` silently kills `start` before the app even boots.
+  return 0
 }
 
 make_scratch_branch() {
@@ -373,10 +377,16 @@ harness_agent_collector_start() {
   local agent_name="$APP-instrumentation"
 
   mkdir -p "$LOG_DIR"
-  local col_grpc col_http
+  local col_grpc col_http col_bind
   col_grpc=$(free_port); col_http=$(free_port)
+  # Bind localhost normally; bind 0.0.0.0 when the agent runs in a container (HARNESS_CONTAINERIZE=1)
+  # so it can reach this host-side collector via host.docker.internal (the Docker gateway). A
+  # 127.0.0.1 bind would be unreachable from the container.
+  col_bind="127.0.0.1"
+  [[ "${HARNESS_CONTAINERIZE:-0}" == "1" ]] && col_bind="0.0.0.0"
 
   sed \
+    -e "s|%COLLECTOR_BIND%|$col_bind|g" \
     -e "s|%COLLECTOR_GRPC_PORT%|$col_grpc|g" \
     -e "s|%COLLECTOR_HTTP_PORT%|$col_http|g" \
     -e "s|%HONEYCOMB_ENDPOINT%|$hc_endpoint|g" \
@@ -768,8 +778,17 @@ harness_instrument() {
 
   local otlp_endpoint="${OTEL_EXPORTER_OTLP_ENDPOINT:-https://api.honeycomb.io}"
 
+  # The path the agent resolves ${CLAUDE_PLUGIN_ROOT} against AT RUNTIME. On the host that is the
+  # same dir we read the skill from. When the agent runs in a container (HARNESS_CONTAINERIZE=1) the
+  # skill tree is bind-mounted at a fixed in-container path (mirroring the harness layout so
+  # src/instrumentation.ts computes the identical pluginRoot), so bake THAT into the prompt instead.
+  local subst_plugin_root="$claude_plugin_root"
+  if [[ "${HARNESS_CONTAINERIZE:-0}" == "1" ]]; then
+    subst_plugin_root="${HARNESS_CONTAINER_PLUGIN_ROOT:-/harness/agent-skill/honeycomb}"
+  fi
+
   local skill_content
-  skill_content=$(sed "s|\${CLAUDE_PLUGIN_ROOT}|$claude_plugin_root|g" "$skill_file")
+  skill_content=$(sed "s|\${CLAUDE_PLUGIN_ROOT}|$subst_plugin_root|g" "$skill_file")
 
   # skill_git_root (the marketplace symlink → dev repo) is set at the top of this
   # function; it has a .git so we can read the branch/SHA the content came from.
