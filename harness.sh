@@ -746,11 +746,21 @@ harness_instrument() {
     fi
   fi
 
+  # The commit message is free text but .skill-version is `source`d by cmd_start under
+  # `set -euo pipefail`. Strip shell-active characters ($ ` " \) so a message containing e.g.
+  # ${VAR}, $(cmd), or a quote can't break the source (unbound variable) or inject commands.
+  # It's a human-readable label only, so dropping a few symbols is fine.
+  local skill_commit_safe=$skill_commit_msg
+  skill_commit_safe=${skill_commit_safe//\$/}
+  skill_commit_safe=${skill_commit_safe//\`/}
+  skill_commit_safe=${skill_commit_safe//\"/}
+  skill_commit_safe=${skill_commit_safe//\\/}
+
   # Write .skill-version so cmd_start can tag spans regardless of language
   cat > "$REPO_DIR/.skill-version" <<EOF
 SKILL_BRANCH=$skill_branch
 SKILL_SHA=$skill_sha
-SKILL_COMMIT_MSG="$skill_commit_msg"
+SKILL_COMMIT_MSG="$skill_commit_safe"
 SKILL_CONTENT_HASH=$skill_content_hash
 SKILL_UNCOMMITTED=$skill_uncommitted
 EOF
