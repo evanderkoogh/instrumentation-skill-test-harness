@@ -1,7 +1,7 @@
 import { config } from "dotenv";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
-import { writeFileSync, readdirSync, appendFileSync, mkdirSync } from "fs";
+import { writeFileSync, readdirSync, readFileSync, appendFileSync, mkdirSync, rmSync } from "fs";
 import { spawn } from "node:child_process";
 import {
   harness,
@@ -40,19 +40,28 @@ for (let i = 2; i < process.argv.length; i++) {
   else apps.push(a);
 }
 
-if (apps.length === 0) {
+// `kill`/`stop` subcommand: cleanly terminate active runs (and their app servers / collector /
+// weaver) via tracked PID files — instead of hand-rolled pkill patterns that miss the children.
+// `run.ts kill` with no targets stops every app.
+const killMode = apps[0] === "kill" || apps[0] === "stop";
+if (killMode) apps.shift();
+
+if (!killMode && apps.length === 0) {
   console.error(
-    "Usage: npx tsx run.ts <app...|all> [--parallel] [--model <model-id>] [--skill-desc <text>]"
+    "Usage: npx tsx run.ts <app...|all> [--parallel] [--model <model-id>] [--skill-desc <text>]\n" +
+      "       npx tsx run.ts kill [app...|all]   # stop active run(s)"
   );
   process.exit(1);
 }
 
-// "all" expands to every app profile under apps/.
-const appList = apps.includes("all")
-  ? readdirSync(resolve(__dirname, "apps"), { withFileTypes: true })
-      .filter((d) => d.isDirectory())
-      .map((d) => d.name)
-  : apps;
+const allApps = (): string[] =>
+  readdirSync(resolve(__dirname, "apps"), { withFileTypes: true })
+    .filter((d) => d.isDirectory())
+    .map((d) => d.name);
+
+// "all" (or, in kill mode, no targets) expands to every app profile under apps/.
+const appList =
+  apps.includes("all") || (killMode && apps.length === 0) ? allApps() : apps;
 
 // Ingest key — forwarded to the instrumentation agent for OTLP export
 const ingestKey = (() => {
@@ -65,13 +74,16 @@ const ingestKey = (() => {
 // Must have "Query Data" permission (ingest keys are write-only)
 const queryApiKey = process.env.HONEYCOMB_QUERY_API_KEY ?? "";
 
-if (!ingestKey) {
-  console.error("OTEL_EXPORTER_OTLP_HEADERS not set in .env");
-  process.exit(1);
-}
-if (!queryApiKey) {
-  console.error("HONEYCOMB_QUERY_API_KEY not set in .env (needs Query Data permission)");
-  process.exit(1);
+// Keys are only needed to RUN; the kill subcommand doesn't touch Honeycomb.
+if (!killMode) {
+  if (!ingestKey) {
+    console.error("OTEL_EXPORTER_OTLP_HEADERS not set in .env");
+    process.exit(1);
+  }
+  if (!queryApiKey) {
+    console.error("HONEYCOMB_QUERY_API_KEY not set in .env (needs Query Data permission)");
+    process.exit(1);
+  }
 }
 
 // Per-app, run-scoped progress logger. Truncates tmp/run-progress.<app>.log at the
@@ -88,7 +100,73 @@ function makeProgressLog(app: string): (line: string) => void {
   };
 }
 
+// --- Run-process tracking ---
+// Each in-flight app run records its PID here so we can detect a run that's already in progress
+// (and refuse to start a second one that would collide on ports/logs) and stop it cleanly later —
+// rather than guessing pkill patterns that miss the children.
+const runPidFile = (app: string) => resolve(__dirname, "tmp", `.run.${app}.pid`);
+
+function pidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0); // signal 0 = liveness probe, sends nothing
+    return true;
+  } catch {
+    return false; // ESRCH (gone) or EPERM (alive but not ours — treat as not-ours-to-manage)
+  }
+}
+
+// The PID of an in-flight run for this app, or null. A stale pid file (process gone) reads as null,
+// so a crashed run never blocks a fresh one.
+function activeRunPid(app: string): number | null {
+  try {
+    const pid = Number(readFileSync(runPidFile(app), "utf8").trim());
+    return pidAlive(pid) ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+// Stop active run(s): SIGTERM (then SIGKILL) the run process, and always run `harness stop` to
+// clear the app server / collector / weaver it may have spawned (those hold ports).
+async function killRuns(targets: string[]): Promise<void> {
+  for (const app of targets) {
+    const pid = activeRunPid(app);
+    if (pid) {
+      console.log(`Stopping run for ${app} (PID ${pid})…`);
+      try { process.kill(pid, "SIGTERM"); } catch {}
+      for (let i = 0; i < 20 && pidAlive(pid); i++) await sleep(250);
+      if (pidAlive(pid)) {
+        console.log(`  PID ${pid} still alive after 5s — SIGKILL.`);
+        try { process.kill(pid, "SIGKILL"); } catch {}
+      }
+    } else {
+      console.log(`No active run process for ${app}.`);
+    }
+    rmSync(runPidFile(app), { force: true });
+    try { harness(app, "stop"); } catch { /* best-effort cleanup of servers/collector/weaver */ }
+  }
+  console.log("Done.");
+}
+
 async function runApp(app: string): Promise<void> {
+  // Refuse to start if a run for this app is already in progress — a second one would collide on
+  // ports and clobber the progress log. (Checked before makeProgressLog so we don't truncate the
+  // active run's log.) Stale pid files (dead process) don't block.
+  const existing = activeRunPid(app);
+  if (existing) {
+    console.error(
+      `✋ A run for ${app} is already in progress (PID ${existing}). ` +
+        `Stop it first:  npx tsx run.ts kill ${app}`
+    );
+    throw new Error(`run already active for ${app} (PID ${existing})`);
+  }
+  mkdirSync(resolve(__dirname, "tmp"), { recursive: true });
+  writeFileSync(runPidFile(app), String(process.pid));
+  process.once("exit", () => {
+    try { rmSync(runPidFile(app), { force: true }); } catch {}
+  });
+
   const tracer = getTracer();
   const { dataset } = readAppConfig(app);
   const timestamp = new Date().toISOString();
@@ -332,6 +410,12 @@ function spawnChild(app: string): Promise<number> {
 }
 
 async function orchestrate(): Promise<void> {
+  // `kill`/`stop` subcommand: stop active runs and exit (no tracing, no Honeycomb).
+  if (killMode) {
+    await killRuns(appList);
+    return;
+  }
+
   // Single app → run inline so the run spans export from this process.
   if (appList.length === 1) {
     initTracing();

@@ -39,7 +39,13 @@ Run a full test with:
 npx tsx run.ts broadleaf                  # one app (runs inline)
 npx tsx run.ts broadleaf realworld-go     # several apps, sequentially
 npx tsx run.ts all --parallel             # every app under apps/, concurrently
+npx tsx run.ts kill [app...|all]          # cleanly stop active run(s)
 ```
+
+Each in-flight run records a PID file (`tmp/.run.<app>.pid`). Starting an app whose run is
+already active is **refused** (avoids port/log collisions), and `run.ts kill <app|all>` stops
+the run process and its app server / collector / weaver — use this rather than hand-rolled
+`pkill`, which misses the child processes and leaves orphans that corrupt later runs' logs.
 
 With more than one app, `run.ts` spawns one isolated child process per app
 (`--parallel` runs them concurrently; otherwise sequentially) and prints a
