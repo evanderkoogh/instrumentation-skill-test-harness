@@ -21,6 +21,17 @@ APP_HSQLDB_PORT="$BROADLEAF_HSQLDB_PORT"      # embedded HSQLDB (implicit Broadl
 # in-checkout start-site.sh; also opens HSQLDB on $APP_HSQLDB_PORT and needs the seeded DB.
 APP_START_HINT="from the repo root: SITE_HTTP_PORT=$APP_HTTP_PORT SITE_HTTPS_PORT=$APP_HTTPS_PORT ./start-site.sh"
 
+# App facts rendered into the shared instrumentation prompt template
+# ($SCRIPT_DIR/instrument-preamble.template.md). Plain facts about the app only — no
+# instrumentation how-to (that lives in the skill).
+APP_DESCRIPTION="the Broadleaf Commerce DemoSite — an e-commerce storefront plus admin console"
+APP_LANGUAGE="Java (Spring Boot, Maven multi-module)"
+APP_FRAMEWORKS="Spring MVC, Spring Boot, Hibernate/JPA, HSQLDB, Apache Solr"
+APP_CODE_LOCATION="Most request-handling code lives in the Broadleaf framework JARs pulled in via Maven, not in this checkout's own source."
+APP_BUILD_HINT="mvn clean install -DskipTests"
+APP_ENV_SURFACE="the launch script start-site.sh"
+APP_READINESS="the log line \"Started SiteApplication\" appears (the admin app logs \"Started AdminApplication\")"
+
 MAVEN_OPTS_VAL="-Xmx1g"
 
 cmd_setup() {

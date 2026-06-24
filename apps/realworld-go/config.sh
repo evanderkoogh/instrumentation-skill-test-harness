@@ -16,6 +16,17 @@ BINARY_NAME="conduit"
 # How to start the app for LOCAL verification (surfaced to the agent via the prompt).
 APP_START_HINT="from the repo root: build with 'go build -o $BINARY_NAME .', then run 'PORT=$APP_HTTP_PORT ./$BINARY_NAME'"
 
+# App facts rendered into the shared instrumentation prompt template
+# ($SCRIPT_DIR/instrument-preamble.template.md). Plain facts about the app only — no
+# instrumentation how-to (that lives in the skill).
+APP_DESCRIPTION="the RealWorld \"Conduit\" backend — a Medium-style blogging REST API"
+APP_LANGUAGE="Go"
+APP_FRAMEWORKS="Gin (HTTP), GORM (ORM) over SQLite, JWT auth"
+APP_CODE_LOCATION="Single Go module. Entry point hello.go (package main) builds the Gin router and calls r.Run. Routes are grouped under /api (users, articles, profiles, tags packages). Persistence is GORM over SQLite, opened in common/database.go and auto-migrated on startup."
+APP_BUILD_HINT="go build ./..."
+APP_ENV_SURFACE="the process environment / your run command"
+APP_READINESS="GET http://localhost:$APP_HTTP_PORT/api/ping/ returns 200"
+
 cmd_build() {
   if [[ ! -d "$REPO_DIR" ]]; then
     echo "Repo not found. Run 'download' first." >&2

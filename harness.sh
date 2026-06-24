@@ -784,35 +784,84 @@ harness_instrument() {
   if [[ -f "$APP_DIR/traffic.sh" ]]; then
     cp "$APP_DIR/traffic.sh" "$REPO_DIR/$verify_traffic_rel" 2>/dev/null || true
   fi
-  # Ports this app must bind (from the registry) + how to start it, surfaced to the agent so
-  # its verification uses the right ports/start instead of guessing.
+  # Ports this app must bind (from the registry), surfaced to the agent so its verification
+  # uses the right ports instead of guessing.
   local verify_ports="(none registered)"
   if declare -f app_ports > /dev/null 2>&1; then
     verify_ports="$(app_ports "$APP")"
     [[ -z "$verify_ports" ]] && verify_ports="(none registered)"
   fi
-  local start_hint="${APP_START_HINT:-see the run and start scripts in the checkout}"
-  # Escape characters special to a sed replacement (\, &, |) so hints can't corrupt the render.
-  start_hint=$(printf '%s' "$start_hint" | sed -e 's/[\\&|]/\\&/g')
 
-  local subst=(-e "s|%REPO_DIR%|$REPO_DIR|g" -e "s|%API_KEY%|$api_key|g" -e "s|%OTLP_ENDPOINT%|$otlp_endpoint|g" -e "s|%APP_DATASET%|${APP_DATASET:-}|g" -e "s|%VERIFY_PORTS%|$verify_ports|g" -e "s|%START_HINT%|$start_hint|g" -e "s|%TRAFFIC_SCRIPT%|$verify_traffic_rel|g")
+  # The prompt is a single preamble rendered from a shared, user-voice template
+  # ($SCRIPT_DIR/instrument-preamble.template.md) filled with this app's facts. All app-specific
+  # facts come from APP_* vars in apps/<app>/config.sh; anything an app leaves unset gets a sensible
+  # default here so the template always renders. (No per-app preamble files — keep facts in config.sh.)
+  local f_desc="${APP_DESCRIPTION:-$APP_NAME}"
+  local f_lang="${APP_LANGUAGE:-${APP_OTEL_AGENT_TYPE:-unspecified}}"
+  local f_frameworks="${APP_FRAMEWORKS:-(see the codebase)}"
+  local f_code_location="${APP_CODE_LOCATION:-The code is in this checkout itself.}"
+  local f_build="${APP_BUILD_HINT:-(see the build config in the checkout)}"
+  local f_start="${APP_START_HINT:-(see the start scripts in the checkout)}"
+  local f_readiness="${APP_READINESS:-it accepts requests on its main port}"
+  local f_env_surface="${APP_ENV_SURFACE:-the launch command / process environment}"
+  local f_stop="${APP_STOP_HINT:-stop the process(es) you started}"
+  local f_attr_naming="${APP_ATTR_NAMING:-use the app.* namespace}"
+  local f_weaver_registry="${APP_WEAVER_REGISTRY:-none - create one as part of the work}"
+  local f_import_registries="${APP_IMPORT_REGISTRIES:-none beyond the upstream OpenTelemetry semantic conventions}"
 
-  local app_preamble=""
-  if [[ -f "$APP_DIR/instrument-preamble.md" ]]; then
-    app_preamble=$(sed "${subst[@]}" "$APP_DIR/instrument-preamble.md")
+  # Escape characters special to a sed replacement (\, &, |) so values can't corrupt the render.
+  # Pre-escape into plain vars first, then build the subst array with simple expansions —
+  # nesting "$(_esc "...")" inside the array elements trips the macOS bash 3.2 parser.
+  _esc() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
+  local e_repo e_api e_endpoint e_dataset e_ports e_traffic e_desc e_lang e_frameworks
+  local e_code e_build e_start e_readiness e_env e_stop e_attr e_weaver e_imports
+  e_repo=$(_esc "$REPO_DIR")
+  e_api=$(_esc "$api_key")
+  e_endpoint=$(_esc "$otlp_endpoint")
+  e_dataset=$(_esc "${APP_DATASET:-}")
+  e_ports=$(_esc "$verify_ports")
+  e_traffic=$(_esc "$verify_traffic_rel")
+  e_desc=$(_esc "$f_desc")
+  e_lang=$(_esc "$f_lang")
+  e_frameworks=$(_esc "$f_frameworks")
+  e_code=$(_esc "$f_code_location")
+  e_build=$(_esc "$f_build")
+  e_start=$(_esc "$f_start")
+  e_readiness=$(_esc "$f_readiness")
+  e_env=$(_esc "$f_env_surface")
+  e_stop=$(_esc "$f_stop")
+  e_attr=$(_esc "$f_attr_naming")
+  e_weaver=$(_esc "$f_weaver_registry")
+  e_imports=$(_esc "$f_import_registries")
+
+  local subst=(
+    -e "s|%REPO_DIR%|$e_repo|g"
+    -e "s|%API_KEY%|$e_api|g"
+    -e "s|%OTLP_ENDPOINT%|$e_endpoint|g"
+    -e "s|%APP_DATASET%|$e_dataset|g"
+    -e "s|%VERIFY_PORTS%|$e_ports|g"
+    -e "s|%TRAFFIC_SCRIPT%|$e_traffic|g"
+    -e "s|%APP_DESCRIPTION%|$e_desc|g"
+    -e "s|%APP_LANGUAGE%|$e_lang|g"
+    -e "s|%APP_FRAMEWORKS%|$e_frameworks|g"
+    -e "s|%CODE_LOCATION%|$e_code|g"
+    -e "s|%BUILD_HINT%|$e_build|g"
+    -e "s|%START_HINT%|$e_start|g"
+    -e "s|%READINESS%|$e_readiness|g"
+    -e "s|%ENV_SURFACE%|$e_env|g"
+    -e "s|%STOP_HINT%|$e_stop|g"
+    -e "s|%ATTR_NAMING%|$e_attr|g"
+    -e "s|%WEAVER_REGISTRY%|$e_weaver|g"
+    -e "s|%IMPORT_REGISTRIES%|$e_imports|g"
+  )
+
+  local template_file="$SCRIPT_DIR/instrument-preamble.template.md"
+  if [[ ! -f "$template_file" ]]; then
+    echo "Prompt template not found at: $template_file" >&2
+    exit 1
   fi
-
-  local root_preamble=""
-  if [[ -f "$SCRIPT_DIR/instrument-preamble.md" ]]; then
-    root_preamble=$(sed "${subst[@]}" "$SCRIPT_DIR/instrument-preamble.md")
-  fi
-
-  local preamble=""
-  if [[ -n "$app_preamble" && -n "$root_preamble" ]]; then
-    preamble="$app_preamble"$'\n\n'"$root_preamble"
-  else
-    preamble="${app_preamble}${root_preamble}"
-  fi
+  local preamble
+  preamble=$(sed "${subst[@]}" "$template_file")
 
   local skill_commit_msg
   skill_commit_msg=$(git -C "$skill_git_root" log -1 --format=%s 2>/dev/null || echo "unknown")
@@ -857,11 +906,8 @@ EOF
 
   local prompt_file="$TMP_DIR/.instrument-prompt.$APP.md"
   {
-    if [[ -n "$preamble" ]]; then
-      printf '%s\n\n---\n' "$preamble"
-    fi
-    printf '%s\n---\n\n' "$skill_content"
-    echo "Explore the codebase at $REPO_DIR, then apply instrumentation following the skill above."
+    printf '%s\n\n---\n\n' "$preamble"
+    printf '%s\n' "$skill_content"
   } > "$prompt_file"
 
   echo "Agent prompt written to: $prompt_file"

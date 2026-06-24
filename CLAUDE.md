@@ -17,15 +17,18 @@ collector.run.template.yaml  # Per-run OTel Collector config (fan-out to Honeyco
 otel/                 # Downloaded tooling (gitignored): Java agent, weaver, otelcol-contrib
 apps/
   <app>/              # One directory per target app (e.g. broadleaf, realworld-go, beaverhabits)
-    config.sh         # App-specific variables and start/stop/build hooks
+    config.sh         # App-specific variables (incl. the APP_* facts for the prompt) and start/stop/build hooks
     traffic.sh        # Traffic generation script
-    instrument-preamble.md  # App-specific intro injected into the agent prompt
     EVALUATION.md     # Evaluation checklist for this app
 checkouts/
   <app>/              # Cloned app code (gitignored)
 ```
 
-To add a new app, create `apps/<name>/` with `config.sh`, `traffic.sh`, `instrument-preamble.md`, and `EVALUATION.md`. No changes to shared harness code required.
+The agent prompt is one preamble rendered from a shared, user-voice template
+(`instrument-preamble.template.md` at the repo root) filled with each app's `APP_*` facts from
+`config.sh` — there are no per-app preamble files. To add a new app, create `apps/<name>/` with
+`config.sh` (including its `APP_*` fact vars), `traffic.sh`, and `EVALUATION.md`. No changes to shared
+harness code required.
 
 ## Purpose
 
@@ -146,8 +149,9 @@ Guidelines for what to write into a skill:
 
 1. `mkdir apps/<name>`
 2. **Claim ports in `ports.sh`** (the central registry) — add the app to `registered_apps()` and `app_ports()`, and define a var for **every** port it binds, including *implicit* ones the framework opens (embedded DBs, admin connectors, etc. — e.g. Broadleaf's HSQLDB on 9001). Ports must be globally disjoint; run `./harness.sh <name> ports` to verify no collisions. The harness kills processes on these ports before each `start`, so they must be accurate.
-3. Create `apps/<name>/config.sh` — set `APP_NAME`, `APP_REPO`, `APP_CLEAN_SHA` (a commit SHA from the upstream repo; no fork required), `APP_OTEL_AGENT_TYPE`, reference the registry port vars (e.g. `APP_HTTP_PORT="$<NAME>_HTTP_PORT"`), and define `cmd_build()`, `cmd_start()` (and optionally `cmd_bootstrap()`, `cmd_status()`)
+3. Create `apps/<name>/config.sh` — set `APP_NAME`, `APP_REPO`, `APP_CLEAN_SHA` (a commit SHA from the upstream repo; no fork required), `APP_OTEL_AGENT_TYPE`, reference the registry port vars (e.g. `APP_HTTP_PORT="$<NAME>_HTTP_PORT"`), and define `cmd_build()`, `cmd_start()` (and optionally `cmd_bootstrap()`, `cmd_status()`). Also set the **`APP_*` fact vars** the shared prompt template renders: `APP_DATASET` (service name), `APP_DESCRIPTION`, `APP_LANGUAGE`, `APP_FRAMEWORKS`, `APP_CODE_LOCATION`, `APP_BUILD_HINT`, `APP_START_HINT`, `APP_ENV_SURFACE`, `APP_READINESS` (and optionally `APP_STOP_HINT`, `APP_ATTR_NAMING`, `APP_WEAVER_REGISTRY`, `APP_IMPORT_REGISTRIES`). Anything you omit falls back to a sensible default in `harness.sh`. Keep these to **plain app facts** — no instrumentation how-to (that lives in the skill).
 4. Create `apps/<name>/traffic.sh` — standalone script that generates traffic against the running app (use `${APP_HTTP_PORT}` etc., never hardcode ports)
-5. Create `apps/<name>/instrument-preamble.md` — app-specific intro injected before the skill content; use `%REPO_DIR%`, `%API_KEY%`, `%OTLP_ENDPOINT%`, `%APP_DATASET%` as substitution placeholders
-6. Create `apps/<name>/EVALUATION.md` — evaluation checklist for verifying instrumentation quality
+5. Create `apps/<name>/EVALUATION.md` — evaluation checklist for verifying instrumentation quality
+
+(No per-app preamble file: the prompt is the shared `instrument-preamble.template.md` filled from the `APP_*` vars above. Avoid em-dashes/apostrophes inside `${VAR:-default}` defaults in `harness.sh` — macOS bash 3.2 mis-parses them.)
 7. Run `./harness.sh <name> download` to clone the repo

@@ -10,6 +10,17 @@ APP_DATASET="beaverhabits"
 # How to start the app for LOCAL verification (surfaced to the agent via the prompt).
 APP_START_HINT="from the repo root: HABITS_STORAGE=USER_DISK NICEGUI_STORAGE_SECRET=test TRUSTED_LOCAL_EMAIL=test@example.com uv run uvicorn beaverhabits.main:app --port $APP_HTTP_PORT --host 0.0.0.0"
 
+# App facts rendered into the shared instrumentation prompt template
+# ($SCRIPT_DIR/instrument-preamble.template.md). Plain facts about the app only — no
+# instrumentation how-to (that lives in the skill).
+APP_DESCRIPTION="BeaverHabits — a self-hosted habit-tracking web app"
+APP_LANGUAGE="Python"
+APP_FRAMEWORKS="NiceGUI (FastAPI / Starlette under the hood), SQLAlchemy (async), Uvicorn"
+APP_CODE_LOCATION="The code is in this checkout's own source tree (the beaverhabits package)."
+APP_BUILD_HINT="uv sync — a .venv with base dependencies already exists, so prefer 'uv add <pkg>' for new packages rather than re-syncing"
+APP_ENV_SURFACE="the uvicorn launch command / process environment"
+APP_READINESS="the log line \"Application startup complete\" appears"
+
 cmd_build() {
   if [[ ! -d "$REPO_DIR" ]]; then
     echo "Repo not found. Run 'download' first." >&2
