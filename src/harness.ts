@@ -42,7 +42,21 @@ export function harnessStart(app: string, runId?: string): void {
     env: runId ? { ...process.env, HARNESS_RUN_ID: runId } : process.env,
   });
   if (result.status !== 0) {
-    throw new StartupFailure(result.stderr ?? "");
+    // Capture everything useful, not just stderr: `harness.sh start` logs its phases to stdout
+    // and may fail with an empty stderr (or be killed by a signal), which left the run's
+    // failure_reason blank and the failure unactionable. Include stdout, stderr, the spawn error,
+    // and how it exited, and never throw a blank reason.
+    const reason =
+      [
+        result.stderr?.trim(),
+        result.stdout?.trim(),
+        result.error ? `spawn error: ${result.error.message}` : "",
+        result.status !== null ? `exit code ${result.status}` : "",
+        result.signal ? `killed by signal ${result.signal}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n") || "harness.sh start failed with no captured output";
+    throw new StartupFailure(reason);
   }
 }
 
