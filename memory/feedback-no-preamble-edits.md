@@ -1,12 +1,29 @@
 ---
 name: feedback-no-preamble-edits
-description: Never edit app instrument-preamble.md files without explicit permission; instrumentation directions go in the skill
+description: Never add instrumentation guidance to an app's instrument-preamble.md; preambles hold only general framing + app-specific facts needed to start. Suggest-and-ask, never bake in.
 metadata:
   type: feedback
 ---
 
-Never change an application's `instrument-preamble.md` (under `apps/<name>/`) without the user's explicit permission. Any instructions about *how* to instrument belong in the skill (`agent-skill/honeycomb/skills/.../SKILL.md`), not the per-app preamble.
+An application's `instrument-preamble.md` (under `apps/<name>/`) may contain **only** two kinds of
+content: (1) the general, app-agnostic framing of the instrumentation task, and (2) the app-specific
+*facts* the agent needs to begin (what the app is, its language/framework, the dataset/service name to
+use, how to reach it). It must **never** contain instrumentation *instructions* — any guidance about
+*how* to instrument (techniques, attribute choices, fixes, gotchas, "do X to avoid Y"). All such
+guidance belongs in the skill (`agent-skill/honeycomb/skills/.../SKILL.md`).
 
-**Why:** This repo exists to develop and test the instrumentation skill. The skill must carry all instrumentation guidance so it's what gets evaluated; baking directions into a preamble would leak app-specific hints and invalidate the test.
+You may **suggest** a preamble change and **ask for explicit permission**, but never add instrumentation
+instructions to a preamble on your own — and if a "fix" really is instrumentation guidance, the answer
+is to put it in the skill, not to ask to add it to the preamble.
 
-**How to apply:** When a task needs the agent to do something during instrumentation (e.g. "hardcode service.name"), put it in the SKILL.md. Leave preambles as minimal app-context only. Harness config (`config.sh`) and evaluation (`evaluation.ts`, `EVALUATION.md`) changes are fine without asking.
+**Why:** The deliverable is a **portable instrumentation skill**, not perfectly-instrumented sample
+apps. The skill must carry all instrumentation guidance so that *the skill* is what gets evaluated.
+Baking how-to-instrument hints into a preamble leaks app-specific answers, makes the app pass for the
+wrong reason, and invalidates the test of whether the skill stands on its own. See
+[[project-goal-portable-skills]].
+
+**How to apply:** When a run surfaces something the agent should do during instrumentation (e.g.
+"set service.name", "raise the BSP queue size", "disable the agent's self-telemetry"), generalize it
+into the SKILL.md — never the preamble. Keep preambles to minimal app context + start-up facts only.
+Harness config (`config.sh`) and evaluation (`evaluation.ts`, `EVALUATION.md`) changes are fine
+without asking.

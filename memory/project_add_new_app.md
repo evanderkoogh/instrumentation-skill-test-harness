@@ -48,17 +48,28 @@ cmd_setup() {
 
 Standalone script that generates representative HTTP traffic. The harness calls it after the app starts. Curl all key routes. Must not block — fire all requests and exit.
 
-### 4. Create `apps/<name>/instrument-preamble.md`
+### 4. Set the `APP_*` fact vars in `config.sh` (no per-app preamble file)
 
-Injected before the skill content in the agent prompt. Keep it short. Standard boilerplate:
+There are **no per-app `instrument-preamble.md` files**. The agent prompt is one preamble rendered
+from a shared, user-voice template (`instrument-preamble.template.md` at the repo root) filled with
+each app's `APP_*` facts. So put the app facts in `config.sh`:
 
-```markdown
-You are applying OpenTelemetry instrumentation to <AppName> — <one-line description>.
-```
+`APP_DATASET` (service name), `APP_DESCRIPTION`, `APP_LANGUAGE`, `APP_FRAMEWORKS`, `APP_CODE_LOCATION`,
+`APP_BUILD_HINT`, `APP_START_HINT`, `APP_ENV_SURFACE`, `APP_READINESS`, and optionally `APP_STOP_HINT`,
+`APP_ATTR_NAMING`, `APP_WEAVER_REGISTRY`, `APP_IMPORT_REGISTRIES`. Anything you omit falls back to a
+sensible default in `harness.sh`.
 
-Use `%REPO_DIR%`, `%API_KEY%`, `%OTLP_ENDPOINT%`, `%APP_DATASET%` as substitution placeholders.
+Keep these to **plain app facts only — no instrumentation how-to** (that lives in the skill; see
+[[feedback-no-preamble-edits]]). The template is written in the voice of a user who just wants their
+app instrumented — no conductor/orchestration mechanics.
 
-The harness intentionally does **not** set `OTEL_SERVICE_NAME` — the instrumentation skill is responsible for setting `service.name`. So the preamble must pin it for the harness to find the data: add a line telling the agent to use `%APP_DATASET%` as the service name (`service.name` / `OTEL_SERVICE_NAME`) so traces land in the matching Honeycomb dataset. The `service_name` evaluation criterion (in `src/evaluation.ts`) fails if `service.name` is absent or left at the OTel default (`unknown_service`).
+The harness intentionally does **not** set `OTEL_SERVICE_NAME` — the instrumentation skill must set
+`service.name` itself. The template tells the agent to use `APP_DATASET` as the service name so traces
+land in the matching Honeycomb dataset; the `service_name` criterion (`src/evaluation.ts`) fails if
+`service.name` is absent or left at `unknown_service`.
+
+**Gotcha:** don't put em-dashes or apostrophes inside a `${VAR:-default}` default in `harness.sh` —
+macOS bash 3.2 mis-parses them (use ASCII `-` and avoid apostrophes in those defaults).
 
 ### 5. Create `apps/<name>/EVALUATION.md`
 
@@ -74,6 +85,14 @@ App-specific evaluation checklist. The harness evaluation criteria are coded in 
 
 ## Language-specific callouts
 
+**New language/runtime? Check the implementer skill has a guide for it.** The
+`otel-instrumentation-implementation` skill keeps an *explicit list* of languages that have a
+dedicated `references/<language>.md` guide (currently Go, Java/JVM, Python) and says that guide
+takes precedence over the skill's generic steps. If the new app's language/runtime is **not** in
+that list, decide whether to author a `references/<language>.md` guide and add it to the list in
+`agent-skill/honeycomb/skills/otel-instrumentation-implementation/SKILL.md` — the list is a
+maintenance point that won't update itself. See [[project-goal-portable-skills]].
+
 ### Java / Spring Boot
 
 - The upstream repo likely lacks start scripts. Create `apps/<name>/files/start-site.sh` (and `-admin.sh` if needed) and install via `cmd_setup()`.
@@ -84,8 +103,7 @@ App-specific evaluation checklist. The harness evaluation criteria are coded in 
 ### Python (uv)
 
 - `build` runs `uv sync`, which creates `.venv` and installs base deps.
-- Add this to `instrument-preamble.md` to avoid the agent re-running `uv sync` (~2 min wasted per run):
-  > A virtual environment already exists at %REPO_DIR%/.venv with base dependencies installed. Do not run `uv sync` — use `uv add` to install any additional packages you need.
+- Note the existing `.venv` in `APP_BUILD_HINT` so the agent doesn't re-run `uv sync` (~2 min wasted per run) — e.g. "uv sync — a .venv with base dependencies already exists, so prefer 'uv add <pkg>' for new packages rather than re-syncing".
 - The agent is expected to `uv add` the OTel packages (that IS part of what's being tested).
 
 ### Node.js
@@ -94,8 +112,9 @@ App-specific evaluation checklist. The harness evaluation criteria are coded in 
 
 ---
 
-## Preamble gotcha (applies to all apps)
+## Prompt assembly (applies to all apps)
 
-The **global** `instrument-preamble.md` (repo root) already tells the agent not to start the app or verify spans. Do NOT add that to individual app preambles — the global one covers it.
-
-**Why:** When the skill is used outside the harness, starting the app and verifying spans IS the right behavior. The harness-specific instruction only belongs in the harness global preamble.
+There is one shared template (`instrument-preamble.template.md`) rendered per app from `config.sh`
+`APP_*` vars — so any cross-app framing (fresh-engagement note, "changes inside the repo only",
+"verify before finishing") lives in that single template, not duplicated per app. To change framing
+for all apps, edit the template; to change one app's facts, edit its `config.sh`.
