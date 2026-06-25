@@ -3,6 +3,7 @@
 - [User profile](user_erwin.md) — Erwin's role, preferences, collaboration style
 - [Portable skills are the deliverable](project-goal-portable-skills.md) — fix instrumentation quality in the skill, not the harness; harness changes only for better measurement
 - [Always run under caffeinate](run-under-caffeinate.md) — wrap harness runs in `caffeinate -dimsu`; laptop sleep mid-run corrupts results
+- [Rebuild images after harness change](rebuild-images-after-harness-change.md) — edits to baked harness files (src/*.ts, harness.sh, lifecycle.sh, templates) need a docker rebuild (base then lang) to take effect
 - [Git workflow per repo](trunk-based-dev.md) — harness: trunk-based (push to main); agent-skill: commit on the long-running refactor feature branch
 - [Orchestrator as planner](orchestrator-as-planner.md) — want the otel-instrumentation conductor to plan + ask the user interactive questions when info for the sub-agents is missing
 - [Observing a run](observing-a-run.md) — full picture of a run: local logs + runs.jsonl + the three Honeycomb streams, all scoped by runId
