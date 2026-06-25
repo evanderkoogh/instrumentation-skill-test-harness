@@ -1,15 +1,9 @@
 import { existsSync, readFileSync } from "fs";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
+import type { CriterionResult } from "./evaluation.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-
-// Written by harness.sh start_collector() when the weaver-capture pipeline is up.
-interface WeaverState {
-  adminPort: number;
-  reportFile: string;
-  registry: string;
-}
 
 // Subset of `weaver registry live-check --format json` report we care about.
 interface WeaverReport {
@@ -42,23 +36,25 @@ function sleep(ms: number): Promise<void> {
 // Finalize the per-run weaver live-check (POST its admin /stop, which makes it write the
 // report and exit) and parse the resulting report. weaver ran as an OTLP receiver during
 // traffic, fed by the fan-out collector; here we just collect its verdict.
+//
+// Container-only: the in-container lifecycle (docker/lifecycle.sh) starts the weaver live-check
+// receiver in THIS same container and passes its admin port + the registry it used via env
+// (HARNESS_WEAVER_ADMIN_PORT / HARNESS_WEAVER_REGISTRY) — no host state file. If those aren't set,
+// weaver capture didn't come up, so the criterion is skipped.
 export async function runWeaverLiveCheck(app: string): Promise<WeaverResult> {
-  const stateFile = resolve(__dirname, "..", "tmp", `.harness.${app}.weaver.json`);
-  if (!existsSync(stateFile)) {
+  const adminPort = process.env.HARNESS_WEAVER_ADMIN_PORT;
+  const registry = process.env.HARNESS_WEAVER_REGISTRY;
+  if (!adminPort || !registry) {
     return { pass: false, skipped: true, reason: "weaver capture not enabled for this run" };
   }
-
-  let state: WeaverState;
-  try {
-    state = JSON.parse(readFileSync(stateFile, "utf8")) as WeaverState;
-  } catch (err) {
-    return { pass: false, skipped: true, reason: `unreadable weaver state: ${String(err)}` };
-  }
+  // weaver writes its report under logs/<app>/weaver-report/ (lifecycle.sh --output), in this same
+  // harness layout — derive the path rather than passing it through.
+  const reportFile = resolve(__dirname, "..", "logs", app, "weaver-report", "live_check.json");
 
   // Tell weaver to finalize: it writes reportFile and exits. Best-effort — the report may
-  // already exist if weaver hit its inactivity timeout first.
+  // already exist if weaver hit its inactivity timeout first. Admin is localhost (same netns).
   try {
-    await fetch(`http://127.0.0.1:${state.adminPort}/stop`, { method: "POST" });
+    await fetch(`http://127.0.0.1:${adminPort}/stop`, { method: "POST" });
   } catch {
     // weaver may have already stopped; fall through to reading the report.
   }
@@ -66,9 +62,9 @@ export async function runWeaverLiveCheck(app: string): Promise<WeaverResult> {
   // Poll for the report to be written and fully parseable.
   let report: WeaverReport | null = null;
   for (let i = 0; i < 20; i++) {
-    if (existsSync(state.reportFile)) {
+    if (existsSync(reportFile)) {
       try {
-        report = JSON.parse(readFileSync(state.reportFile, "utf8")) as WeaverReport;
+        report = JSON.parse(readFileSync(reportFile, "utf8")) as WeaverReport;
         break;
       } catch {
         // partial write — wait and retry
@@ -82,7 +78,7 @@ export async function runWeaverLiveCheck(app: string): Promise<WeaverResult> {
       pass: false,
       skipped: true,
       reason: "weaver report not produced",
-      registry: state.registry,
+      registry,
     };
   }
 
@@ -92,7 +88,7 @@ export async function runWeaverLiveCheck(app: string): Promise<WeaverResult> {
   const improvements = levels["improvement"] ?? 0;
   const information = levels["information"] ?? 0;
   const totalEntities = stats.total_entities ?? 0;
-  const registryCustom = state.registry !== "upstream-semconv";
+  const registryCustom = registry !== "upstream-semconv";
 
   // Pass requires: the skill actually created a registry, telemetry reached weaver, and
   // the telemetry raised no violations against that registry. Improvements/information are
@@ -102,7 +98,7 @@ export async function runWeaverLiveCheck(app: string): Promise<WeaverResult> {
   return {
     pass,
     skipped: false,
-    registry: state.registry,
+    registry,
     registry_custom: registryCustom,
     total_entities: totalEntities,
     total_advisories: stats.total_advisories ?? 0,
@@ -110,5 +106,16 @@ export async function runWeaverLiveCheck(app: string): Promise<WeaverResult> {
     improvements,
     information,
     advice_type_counts: stats.advice_type_counts ?? {},
+  };
+}
+
+// Render a WeaverResult as the `weaver_live_check` criterion (pass + human-readable value). Shared by
+// the host path (run.ts) and the containerized path (run-eval.ts) so both produce identical criteria.
+export function weaverCriterion(w: WeaverResult): CriterionResult {
+  return {
+    pass: w.pass,
+    value: w.skipped
+      ? `skipped: ${w.reason}`
+      : `${w.violations} violations, ${w.improvements} improvements (registry: ${w.registry})`,
   };
 }

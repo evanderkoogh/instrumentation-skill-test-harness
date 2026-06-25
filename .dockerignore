@@ -14,20 +14,12 @@ runs.jsonl
 # Mounted at runtime, not baked
 agent-skill
 
-# The eval "answer key" — must be physically absent from the agent container so it cannot be read
-# even if the sandbox hook were bypassed. None of these are imported by the run-agent → instrumentation
-# code path, so the image still builds and runs without them.
-EVALUATION.md
-apps
-src/evaluation.ts
-src/weaver.ts
-src/envvars.ts
+# The eval "answer key" (src/evaluation.ts, weaver.ts, envvars.ts, EVALUATION.md, apps/) is now BAKED
+# into the image — harness-mode entrypoints (eval/start) need it, and the agent step is protected by
+# src/sandbox.ts (makeFsGuard's default-deny whitelist denies these paths just as on a host run). So it
+# is intentionally NOT excluded here.
 
-# Not needed inside the container (host-only orchestration / config)
-run.ts
-harness.sh
-ports.sh
-collector.run.template.yaml
-collector.agent.template.yaml
+# Not needed inside the container — except the in-container lifecycle entrypoint, which is baked.
 docker
+!docker/lifecycle.sh
 .env

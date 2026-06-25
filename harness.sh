@@ -42,23 +42,15 @@ TMP_DIR="$SCRIPT_DIR/tmp"
 mkdir -p "$TMP_DIR"
 LOG_DIR="$SCRIPT_DIR/logs/$APP"
 PID_FILE="$TMP_DIR/.harness.$APP.pids"
-# Per-run weaver-capture pipeline (see start_collector / stop_collector). All
-# app-scoped so concurrent runs get isolated ports, configs, and report files.
-COLLECTOR_PID_FILE="$TMP_DIR/.harness.$APP.collector.pid"
-COLLECTOR_CONFIG="$TMP_DIR/.harness.$APP.collector.yaml"
 # Per-run AGENT-telemetry collector (see agent_collector_start / agent_collector_stop). It
-# runs during the instrument/agent phase — earlier and separate from the app collector above —
-# and remaps the SDK's claude_code.* telemetry into the GenAI conventions. The endpoint file
-# carries its dynamically-allocated OTLP URL back to run.ts (the SDK runs in run.ts's own
-# process, so it can't be handed the port via exported env the way the app is).
+# runs during the instrument/agent phase and remaps the SDK's claude_code.* telemetry into the
+# GenAI conventions. The endpoint file carries its dynamically-allocated OTLP URL back to run.ts
+# (the SDK runs in run.ts's own process, so it can't be handed the port via exported env the way
+# the app is). The per-run APP collector + weaver live-check now run inside the per-run container
+# (docker/lifecycle.sh), not here.
 AGENT_COLLECTOR_PID_FILE="$TMP_DIR/.harness.$APP.agent-collector.pid"
 AGENT_COLLECTOR_CONFIG="$TMP_DIR/.harness.$APP.agent-collector.yaml"
 AGENT_COLLECTOR_ENDPOINT_FILE="$TMP_DIR/.harness.$APP.agent-collector.endpoint"
-WEAVER_PID_FILE="$TMP_DIR/.harness.$APP.weaver.pid"
-WEAVER_STATE_FILE="$TMP_DIR/.harness.$APP.weaver.json"
-WEAVER_REPORT_DIR="$LOG_DIR/weaver-report"
-# Enabled by default; set HARNESS_WEAVER_CAPTURE=0 to export straight to Honeycomb.
-HARNESS_WEAVER_CAPTURE="${HARNESS_WEAVER_CAPTURE:-1}"
 
 # Load .env if present
 if [[ -f "$SCRIPT_DIR/.env" ]]; then
@@ -87,23 +79,6 @@ source "$APP_DIR/config.sh"
 
 port_in_use() {
   lsof -ti tcp:"$1" > /dev/null 2>&1
-}
-
-# Kill anything bound to the given ports — leftovers from a prior run or from an agent's
-# own verification (which now starts the app). Safe to call before `start` because ports.sh
-# keeps each app's ports disjoint from every other app's, so we only ever kill our own.
-clear_ports() {
-  local p pids
-  for p in "$@"; do
-    pids=$(lsof -ti tcp:"$p" 2>/dev/null || true)
-    if [[ -n "$pids" ]]; then
-      echo "Clearing port $p (killing PIDs: $(echo "$pids" | tr '\n' ' '))"
-      kill $pids 2>/dev/null || true
-      sleep 1
-      pids=$(lsof -ti tcp:"$p" 2>/dev/null || true)
-      [[ -n "$pids" ]] && kill -9 $pids 2>/dev/null || true
-    fi
-  done
 }
 
 # `ports` command — print the registry map and verify no collisions.
@@ -155,197 +130,12 @@ make_scratch_branch() {
   echo "$branch"
 }
 
-# Bring up the per-run weaver-capture pipeline:
-#
-#   app --OTLP--> otelcol-contrib --+--otlphttp--> Honeycomb  (existing query eval)
-#                                   +--otlp------> weaver registry live-check (OTLP receiver)
-#
-# weaver scores the live telemetry against the registry the skill created. The report is
-# finalized + read by src/weaver.ts (it POSTs the weaver admin /stop endpoint, then reads
-# live_check.json). Dynamically-allocated ports + app-scoped config/pid/state/report keep
-# concurrent runs isolated. On any problem we warn and fall back to direct-to-Honeycomb
-# export rather than aborting the run.
-start_collector() {
-  [[ "$HARNESS_WEAVER_CAPTURE" == "1" ]] || return 0
-  local col_bin="$SCRIPT_DIR/otel/otelcol-contrib"
-  local weaver_bin="$SCRIPT_DIR/otel/weaver"
-  local template="$SCRIPT_DIR/collector.run.template.yaml"
-  if [[ ! -x "$col_bin" || ! -x "$weaver_bin" || ! -f "$template" ]]; then
-    echo "weaver-capture tooling unavailable (run 'download-tools') — exporting straight to Honeycomb." >&2
-    return 0
-  fi
-
-  # Real Honeycomb destination, captured BEFORE we override the app's env below.
-  local hc_endpoint="${OTEL_EXPORTER_OTLP_ENDPOINT:-https://api.honeycomb.io}"
-  local hc_key=""
-  if [[ -n "${OTEL_EXPORTER_OTLP_HEADERS:-}" ]]; then
-    hc_key=$(printf '%s' "$OTEL_EXPORTER_OTLP_HEADERS" | sed -E 's/.*x-honeycomb-team=([^,]+).*/\1/')
-  fi
-
-  local weaver_grpc weaver_admin col_grpc col_http
-  weaver_grpc=$(free_port); weaver_admin=$(free_port)
-
-  mkdir -p "$LOG_DIR"
-  rm -rf "$WEAVER_REPORT_DIR"; mkdir -p "$WEAVER_REPORT_DIR"
-
-  # Prefer the registry the skill created in the checkout (auto-discovered); else weaver's
-  # upstream semconv default.
-  local registry_dir registry_arg=() registry_used="upstream-semconv"
-  registry_dir=$(find_registry)
-  if [[ -n "$registry_dir" ]]; then
-    registry_arg=(--registry "$registry_dir")
-    registry_used="$registry_dir"
-  fi
-
-  echo "Starting weaver live-check receiver (grpc:$weaver_grpc admin:$weaver_admin registry:$registry_used)..."
-  # Long inactivity timeout: src/weaver.ts explicitly finalizes via the admin /stop endpoint.
-  # NOTE: we deliberately do NOT pass --include-unreferenced. The registry the skill
-  # produces is expected to be self-describing — it must `import` the upstream semconv
-  # attribute groups it builds on (see the otel-instrumentation-implementation skill), so
-  # standard attributes (http.*, db.*, server.*, …) resolve on their own. A registry that
-  # only declares semconv as a `dependency` without importing from it will (correctly)
-  # score those standard attributes as violations: that is a real portability defect in
-  # the registry, not a measurement artifact, and we want the run to surface it.
-  "$weaver_bin" registry live-check \
-    --input-source otlp \
-    --otlp-grpc-address 127.0.0.1 --otlp-grpc-port "$weaver_grpc" \
-    --admin-port "$weaver_admin" \
-    "${registry_arg[@]}" \
-    --format json --output "$WEAVER_REPORT_DIR" \
-    --inactivity-timeout 600 > "$LOG_DIR/weaver.log" 2>&1 &
-  local weaver_pid=$!
-  echo "$weaver_pid" > "$WEAVER_PID_FILE"
-
-  # weaver is a BEST-EFFORT add-on. If it fails to come up we keep going WITHOUT it — the
-  # collector started below is what stamps harness.run_id and fans telemetry to Honeycomb, and
-  # the run-scoped evaluation depends on that. A weaver hiccup (e.g. slow startup under
-  # `run.ts --parallel`) must cost only the weaver criterion, never the whole run's scoping.
-  local waited=0 weaver_ok=1
-  until grep -q "OTLP receiver will stop" "$LOG_DIR/weaver.log" 2>/dev/null; do
-    sleep 1
-    if ! kill -0 "$weaver_pid" 2>/dev/null; then
-      echo "weaver failed to start — check $LOG_DIR/weaver.log. Keeping collector; weaver criterion skipped." >&2
-      rm -f "$WEAVER_PID_FILE"; weaver_ok=0; break
-    fi
-    (( ++waited ))
-    if (( waited >= 60 )); then
-      echo "weaver not ready within 60s — check $LOG_DIR/weaver.log. Keeping collector; weaver criterion skipped." >&2
-      kill "$weaver_pid" 2>/dev/null || true; rm -f "$WEAVER_PID_FILE"; weaver_ok=0; break
-    fi
-  done
-
-  # Per-run id stamped onto every span by the collector (resource/honeycomb processor) so the
-  # evaluation can scope its queries to this run. Provided by run.ts; fall back to an
-  # app+timestamp id if invoked standalone.
-  local run_id="${HARNESS_RUN_ID:-$APP-$(date +%s)}"
-
-  # Skill-version attributes are stamped onto Honeycomb-bound telemetry by the collector
-  # (not by the app), so the weaver pipeline sees clean app telemetry. Read them from the
-  # .skill-version marker written at instrument time; default to "unknown" if absent.
-  local skill_branch="unknown" skill_git_sha="unknown" skill_commit="unknown"
-  local skill_content_hash="unknown" skill_uncommitted="unknown"
-  if [[ -f "$REPO_DIR/.skill-version" ]]; then
-    # shellcheck disable=SC1091
-    source "$REPO_DIR/.skill-version"
-    skill_branch="${SKILL_BRANCH:-unknown}"
-    skill_git_sha="${SKILL_SHA:-unknown}"
-    skill_commit="${SKILL_COMMIT_MSG:-unknown}"
-    skill_content_hash="${SKILL_CONTENT_HASH:-unknown}"
-    skill_uncommitted="${SKILL_UNCOMMITTED:-unknown}"
-  fi
-  # Escape characters special to a sed replacement (\, &, |) — the commit message is free text.
-  local esc='s/[\\&|]/\\&/g'
-  skill_branch=$(printf '%s' "$skill_branch" | sed -e "$esc")
-  skill_git_sha=$(printf '%s' "$skill_git_sha" | sed -e "$esc")
-  skill_commit=$(printf '%s' "$skill_commit" | sed -e "$esc")
-
-  # Allocate the collector ports HERE — right before binding, not up front. The weaver
-  # readiness wait above can take seconds; holding a "free" port idle across that window widens
-  # the chance a concurrent `run.ts --parallel` app grabs it first and our bind then fails.
-  col_grpc=$(free_port); col_http=$(free_port)
-
-  sed \
-    -e "s|%COLLECTOR_GRPC_PORT%|$col_grpc|g" \
-    -e "s|%COLLECTOR_HTTP_PORT%|$col_http|g" \
-    -e "s|%HONEYCOMB_ENDPOINT%|$hc_endpoint|g" \
-    -e "s|%API_KEY%|$hc_key|g" \
-    -e "s|%WEAVER_GRPC_ENDPOINT%|127.0.0.1:$weaver_grpc|g" \
-    -e "s|%RUN_ID%|$run_id|g" \
-    -e "s|%SKILL_BRANCH%|$skill_branch|g" \
-    -e "s|%SKILL_GIT_SHA%|$skill_git_sha|g" \
-    -e "s|%SKILL_COMMIT%|$skill_commit|g" \
-    -e "s|%SKILL_CONTENT_HASH%|$skill_content_hash|g" \
-    -e "s|%SKILL_UNCOMMITTED%|$skill_uncommitted|g" \
-    "$template" > "$COLLECTOR_CONFIG"
-
-  echo "Starting fan-out collector (app http:$col_http -> Honeycomb + weaver)..."
-  "$col_bin" --config "$COLLECTOR_CONFIG" > "$LOG_DIR/collector.log" 2>&1 &
-  local col_pid=$!
-  echo "$col_pid" > "$COLLECTOR_PID_FILE"
-
-  waited=0
-  until port_in_use "$col_http"; do
-    sleep 1
-    if ! kill -0 "$col_pid" 2>/dev/null; then
-      echo "Collector failed to start — check $LOG_DIR/collector.log. Falling back to direct export." >&2
-      rm -f "$COLLECTOR_PID_FILE"; kill "$weaver_pid" 2>/dev/null || true; rm -f "$WEAVER_PID_FILE"
-      return 0
-    fi
-    (( ++waited ))
-    if (( waited >= 20 )); then
-      echo "Collector not ready within 20s — check $LOG_DIR/collector.log. Falling back to direct export." >&2
-      return 0
-    fi
-  done
-
-  # State for src/weaver.ts to finalize (POST /stop) and read the report — only when weaver
-  # actually came up. If it didn't, we leave no state file (weaver.ts reports the criterion as
-  # skipped) while the collector above still gave the run its Honeycomb + run_id scoping.
-  if [[ "$weaver_ok" == "1" ]]; then
-    cat > "$WEAVER_STATE_FILE" <<EOF
-{"adminPort": $weaver_admin, "reportFile": "$WEAVER_REPORT_DIR/live_check.json", "registry": "$registry_used"}
-EOF
-  fi
-
-  # Point the app's OTLP exporter at the local collector. cmd_start launches the app in
-  # a subshell that inherits this exported env; the collector forwards to the real
-  # Honeycomb endpoint/key captured above.
-  # Endpoint + protocol must agree: we point at the collector's HTTP port and declare
-  # http/protobuf. The collector also listens on gRPC, but instrumentation that hardcodes a
-  # gRPC exporter (ignoring OTEL_EXPORTER_OTLP_PROTOCOL) would speak gRPC to this HTTP port and
-  # silently drop ALL telemetry. Correct instrumentation selects its exporter from
-  # OTEL_EXPORTER_OTLP_PROTOCOL, so it follows whichever transport we set here.
-  export OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:$col_http"
-  export OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf"
-  export OTEL_EXPORTER_OTLP_HEADERS=""
-  # Metrics export on a 60s periodic cycle by default — longer than a harness run, so a short
-  # run would capture zero metric datapoints (traces/logs use a few-second batch cadence and are
-  # unaffected). Shorten to 10s so metrics actually flush during the run + 15s flush wait. This is
-  # a harness-runtime concern only; a real long-running service hits the default interval fine.
-  export OTEL_METRIC_EXPORT_INTERVAL="10000"
-  echo "App OTLP export -> $OTEL_EXPORTER_OTLP_ENDPOINT (fan-out to Honeycomb + weaver live-check)"
-}
-
-stop_collector() {
-  local pid
-  if [[ -f "$COLLECTOR_PID_FILE" ]]; then
-    pid=$(cat "$COLLECTOR_PID_FILE")
-    if kill -0 "$pid" 2>/dev/null; then
-      echo "Stopping fan-out collector (PID $pid)..."
-      kill "$pid"
-    fi
-    rm -f "$COLLECTOR_PID_FILE" "$COLLECTOR_CONFIG"
-  fi
-  if [[ -f "$WEAVER_PID_FILE" ]]; then
-    pid=$(cat "$WEAVER_PID_FILE")
-    if kill -0 "$pid" 2>/dev/null; then
-      echo "Stopping weaver live-check (PID $pid)..."
-      kill "$pid"
-    fi
-    rm -f "$WEAVER_PID_FILE"
-  fi
-  rm -f "$WEAVER_STATE_FILE"
-}
+# NOTE: the per-run APP weaver-capture pipeline (fan-out collector + weaver live-check) used to live
+# here as start_collector()/stop_collector(). In container-only mode it runs INSIDE the per-run
+# container instead (docker/lifecycle.sh), where the isolated netns lets it use fixed ports and publish
+# nothing to the host — so the host port bookkeeping (free_port for the app collector, lsof
+# kill-before-start, the weaver state file) is gone. The host keeps only the AGENT-telemetry collector
+# below, which still runs host-side during the agent step.
 
 # Bring up the per-run AGENT-telemetry collector (dispatched as `agent-collector-start`).
 # It receives the Claude Agent SDK's own OTLP telemetry, remaps the claude_code.* spans into
@@ -379,11 +169,10 @@ harness_agent_collector_start() {
   mkdir -p "$LOG_DIR"
   local col_grpc col_http col_bind
   col_grpc=$(free_port); col_http=$(free_port)
-  # Bind localhost normally; bind 0.0.0.0 when the agent runs in a container (HARNESS_CONTAINERIZE=1)
-  # so it can reach this host-side collector via host.docker.internal (the Docker gateway). A
-  # 127.0.0.1 bind would be unreachable from the container.
-  col_bind="127.0.0.1"
-  [[ "${HARNESS_CONTAINERIZE:-0}" == "1" ]] && col_bind="0.0.0.0"
+  # The agent always runs in a container, so it reaches this host-side collector via
+  # host.docker.internal (the Docker gateway) — bind 0.0.0.0 (a 127.0.0.1 bind would be unreachable
+  # from the container).
+  col_bind="0.0.0.0"
 
   sed \
     -e "s|%COLLECTOR_BIND%|$col_bind|g" \
@@ -589,10 +378,10 @@ harness_start() {
 }
 
 harness_stop() {
-  # Always tear down both collectors, even if the app PID file is gone. The agent collector
-  # is normally stopped by run.ts right after the agent finishes; this covers the kill /
-  # mid-run-failure path where it may still be alive.
-  stop_collector
+  # Tear down the agent-telemetry collector even if the app PID file is gone. It is normally stopped
+  # by run.ts right after the agent finishes; this covers the kill / mid-run-failure path where it may
+  # still be alive. (The APP collector + weaver now live inside the per-run container, which tears them
+  # down by exiting — there's nothing host-side left to stop.)
   harness_agent_collector_stop
   if [[ ! -f "$PID_FILE" ]]; then
     echo "No PID file found — servers may not be running."
@@ -778,14 +567,10 @@ harness_instrument() {
 
   local otlp_endpoint="${OTEL_EXPORTER_OTLP_ENDPOINT:-https://api.honeycomb.io}"
 
-  # The path the agent resolves ${CLAUDE_PLUGIN_ROOT} against AT RUNTIME. On the host that is the
-  # same dir we read the skill from. When the agent runs in a container (HARNESS_CONTAINERIZE=1) the
-  # skill tree is bind-mounted at a fixed in-container path (mirroring the harness layout so
-  # src/instrumentation.ts computes the identical pluginRoot), so bake THAT into the prompt instead.
-  local subst_plugin_root="$claude_plugin_root"
-  if [[ "${HARNESS_CONTAINERIZE:-0}" == "1" ]]; then
-    subst_plugin_root="${HARNESS_CONTAINER_PLUGIN_ROOT:-/harness/agent-skill/honeycomb}"
-  fi
+  # The path the agent resolves ${CLAUDE_PLUGIN_ROOT} against AT RUNTIME. The agent always runs in a
+  # container where the skill tree is bind-mounted at a fixed in-container path (mirroring the harness
+  # layout so src/instrumentation.ts computes the identical pluginRoot), so bake THAT into the prompt.
+  local subst_plugin_root="${HARNESS_CONTAINER_PLUGIN_ROOT:-/harness/agent-skill/honeycomb}"
 
   local skill_content
   skill_content=$(sed "s|\${CLAUDE_PLUGIN_ROOT}|$subst_plugin_root|g" "$skill_file")
@@ -942,26 +727,15 @@ dispatch() {
   local cmd="$1"
   shift
   local func_name="${cmd//-/_}"
-  # Bring up the weaver-capture collector and redirect the app's OTLP export before
-  # the app starts (start_collector exports the override env this shell passes on).
-  # Clear any leftover processes on this app's registered ports before any step that boots
-  # the real app — `bootstrap` seeds the DB by launching it, `start` runs it for real. A
-  # process leaked by a prior/failed run (or by the agent's own verification) would otherwise
-  # hold a port and fail the boot (e.g. "Port 8443 was already in use"). No-op if the app
-  # isn't in the registry; disjoint ports (ports.sh) guarantee we never touch a peer app
-  # under --parallel.
-  if [[ "$func_name" == "start" || "$func_name" == "bootstrap" ]]; then
-    if declare -f app_ports > /dev/null 2>&1; then
-      clear_ports $(app_ports "$APP")
-    fi
-  fi
+  # The APP's OTLP export is pointed at the in-container fan-out collector by the lifecycle entrypoint
+  # (docker/lifecycle.sh) before it calls `start`, so there's no host collector to bring up here and —
+  # because the app runs in its own isolated netns — no leftover host ports to clear before booting.
   if [[ "$func_name" == "start" ]]; then
-    start_collector
-    # Simulate an operator opting into the stable HTTP + database semantic conventions
-    # at the deployment level: export it as a real env var before the app process starts.
-    # This is what a real environment would provide, so apps whose launch path the skill
-    # can't edit still get the opt-in honored. (The skill is still expected to communicate
-    # this to users — see the env_var_output criterion.)
+    # Simulate an operator opting into the stable HTTP + database semantic conventions at the
+    # deployment level: export it as a real env var before the app process starts. This is what a real
+    # environment would provide, so apps whose launch path the skill can't edit still get the opt-in
+    # honored. (The skill is still expected to communicate this to users — see the env_var_output
+    # criterion.)
     export OTEL_SEMCONV_STABILITY_OPT_IN="${OTEL_SEMCONV_STABILITY_OPT_IN:-http,database}"
   fi
   if declare -f "cmd_${func_name}" > /dev/null 2>&1; then

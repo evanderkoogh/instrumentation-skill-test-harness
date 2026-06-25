@@ -5,7 +5,6 @@ import { writeFileSync, readdirSync, readFileSync, appendFileSync, mkdirSync, rm
 import { spawn } from "node:child_process";
 import {
   harness,
-  harnessStart,
   readAppConfig,
   readSkillVersion,
   sleep,
@@ -13,11 +12,9 @@ import {
   stopAgentCollector,
   StartupFailure,
 } from "./src/harness.js";
-import { runInstrumentation, type AgentMetrics } from "./src/instrumentation.js";
-import { runInstrumentationInContainer } from "./src/container.js";
-import { evaluate, type EvaluationResults } from "./src/evaluation.js";
-import { runWeaverLiveCheck } from "./src/weaver.js";
-import { evaluateEnvVarOutput } from "./src/envvars.js";
+import type { AgentMetrics } from "./src/instrumentation.js";
+import { runInstrumentationInContainer, runLifecycleInContainer } from "./src/container.js";
+import type { EvaluationResults, FullEvaluation } from "./src/evaluation.js";
 import { recordRun, printSummary } from "./src/metrics.js";
 import { initTracing, shutdownTracing, getTracer } from "./src/otel.js";
 import { SpanStatusCode } from "@opentelemetry/api";
@@ -232,14 +229,17 @@ async function runApp(app: string): Promise<void> {
       try {
         agentMetrics = await tracer.startActiveSpan("instrumentation-agent", async (span) => {
           try {
-            // Opt-in: run the agent step inside a Docker container so its Bash (ps/lsof/kill, its own
-            // weaver, app starts) is isolated from the harness's scoring weaver/collector and sibling
-            // --parallel runs. Same runInstrumentation underneath; only the namespace differs. Host
-            // execution stays the default + fallback.
-            const metrics =
-              process.env.HARNESS_CONTAINERIZE === "1"
-                ? await runInstrumentationInContainer(app, ingestKey, runId, agentCollectorEndpoint, modelArg, skill)
-                : await runInstrumentation(app, ingestKey, runId, agentCollectorEndpoint, modelArg, skill);
+            // The agent step runs inside a Docker container so its Bash (ps/lsof/kill, its own weaver,
+            // app starts) sees only its own PID + network namespace — never the host or sibling
+            // --parallel runs. (Container-only mode: there is no in-process host fallback.)
+            const metrics = await runInstrumentationInContainer(
+              app,
+              ingestKey,
+              runId,
+              agentCollectorEndpoint,
+              modelArg,
+              skill
+            );
             span.setAttributes({
               "agent.model": metrics.model,
               "agent.session_id": metrics.session_id,
@@ -303,20 +303,47 @@ async function runApp(app: string): Promise<void> {
         agent: agentMetrics,
       };
 
-      // --- Start ---
-      log("→ start");
-      harness(app, "stop");
+      // --- Lifecycle: start + traffic + evaluate (all inside the per-run container) ---
+      // One foreground container brings up the app, fan-out collector, and weaver live-check in a
+      // single isolated netns, drives traffic, waits for flush, and scores — returning the merged
+      // criteria + raw weaver result. A startup/collector failure surfaces as StartupFailure (the
+      // container produced no results), recorded as a failed run, mirroring the old host start path.
+      log("→ start + traffic + evaluate (containerized)");
+      let criteria: EvaluationResults;
+      let weaver: FullEvaluation["weaver"];
       try {
-        await tracer.startActiveSpan("start", async (span) => {
+        ({ criteria, weaver } = await tracer.startActiveSpan("lifecycle", async (span) => {
           try {
-            harnessStart(app, runId);
+            const result = await runLifecycleInContainer(
+              app,
+              dataset,
+              ingestKey,
+              queryApiKey,
+              runId,
+              skill
+            );
+            for (const [key, val] of Object.entries(result.criteria)) {
+              span.setAttribute(`criterion.${key}.pass`, val.pass);
+              if (val.value !== undefined) {
+                span.setAttribute(`criterion.${key}.value`, JSON.stringify(val.value));
+              }
+            }
+            if (!result.weaver.skipped) {
+              span.setAttributes({
+                "weaver.violations": result.weaver.violations ?? 0,
+                "weaver.improvements": result.weaver.improvements ?? 0,
+                "weaver.total_entities": result.weaver.total_entities ?? 0,
+                "weaver.registry": result.weaver.registry ?? "",
+              });
+            }
+            return result;
           } catch (err) {
             span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
             throw err;
           } finally {
             span.end();
           }
-        });
+        }));
       } catch (err) {
         if (err instanceof StartupFailure) {
           rootSpan.setAttributes({ "run.failed": true, "run.failure_reason": err.reason });
@@ -324,71 +351,10 @@ async function runApp(app: string): Promise<void> {
           const record = { ...baseRecord, failed: true, failure_reason: err.reason, criteria: undefined };
           recordRun(record);
           printSummary(record, log);
-          harness(app, "stop");
           return;
         }
         throw err;
       }
-
-      // --- Traffic + flush ---
-      log("→ traffic");
-      await tracer.startActiveSpan("traffic", async (span) => {
-        try {
-          harness(app, "traffic");
-        } finally {
-          span.end();
-        }
-      });
-      log("→ waiting 15s for spans to flush");
-      await sleep(15_000);
-
-      // --- Evaluate ---
-      // Honeycomb query criteria + the local weaver live-check verdict. Both run after the
-      // flush wait: evaluate() reads Honeycomb; runWeaverLiveCheck() finalizes the weaver
-      // OTLP receiver (POST /stop) and parses its report. They're independent.
-      log("→ evaluating");
-      const { criteria, weaver } = await tracer.startActiveSpan("evaluate", async (span) => {
-        try {
-          const [hc, weaverResult] = await Promise.all([
-            evaluate(dataset, queryApiKey, runId),
-            runWeaverLiveCheck(app),
-          ]);
-          const merged: EvaluationResults = {
-            ...hc,
-            weaver_live_check: {
-              pass: weaverResult.pass,
-              value: weaverResult.skipped
-                ? `skipped: ${weaverResult.reason}`
-                : `${weaverResult.violations} violations, ${weaverResult.improvements} improvements (registry: ${weaverResult.registry})`,
-            },
-            env_var_output: evaluateEnvVarOutput(
-              app,
-              resolve(__dirname, "checkouts", app),
-              __dirname
-            ),
-          };
-          for (const [key, val] of Object.entries(merged)) {
-            span.setAttribute(`criterion.${key}.pass`, val.pass);
-            if (val.value !== undefined) {
-              span.setAttribute(`criterion.${key}.value`, JSON.stringify(val.value));
-            }
-          }
-          if (!weaverResult.skipped) {
-            span.setAttributes({
-              "weaver.violations": weaverResult.violations ?? 0,
-              "weaver.improvements": weaverResult.improvements ?? 0,
-              "weaver.total_entities": weaverResult.total_entities ?? 0,
-              "weaver.registry": weaverResult.registry ?? "",
-            });
-          }
-          return { criteria: merged, weaver: weaverResult };
-        } catch (err) {
-          span.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
-          throw err;
-        } finally {
-          span.end();
-        }
-      });
 
       const criteriaEntries = Object.entries(criteria);
       const passedCount = criteriaEntries.filter(([, v]) => v.pass).length;
@@ -404,19 +370,11 @@ async function runApp(app: string): Promise<void> {
       const record = { ...baseRecord, failed: false, failure_reason: null, criteria, weaver };
       recordRun(record);
       printSummary(record, log);
-
-      harness(app, "stop");
     } catch (err) {
       rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: String(err) });
-      // Tear down the app's servers + capture collector so a mid-run failure (e.g. an
-      // evaluation/query error after the app is already started) doesn't leak processes that
-      // keep holding this app's ports and break the next run's bootstrap/start. Best-effort:
-      // a cleanup failure must never mask the original error.
-      try {
-        harness(app, "stop");
-      } catch {
-        // ignore — propagate the original failure below
-      }
+      // The app + its collector/weaver run inside the per-run container, which tears them down by
+      // exiting — there are no host-side app processes to clean up on failure. The agent-telemetry
+      // collector (the one host-side process) is already stopped in the agent step's finally above.
       throw err;
     } finally {
       rootSpan.end();

@@ -12,9 +12,12 @@
 # src/instrumentation.ts and src/sandbox.ts run unchanged. Per-language images (docker/agent-<lang>.
 # Dockerfile) are `FROM harness-agent-base` and add ONLY that language's toolchain.
 #
-# At runtime the checkout, tmp/, and the skill tree are bind-mounted in; the eval "answer key"
-# (src/evaluation.ts, weaver.ts, envvars.ts, EVALUATION.md, apps/) is never copied (see .dockerignore),
-# so it is physically absent.
+# At runtime the checkout, tmp/, and the skill tree are bind-mounted in. The FULL harness code is baked
+# — including the eval "answer key" (src/evaluation.ts, weaver.ts, envvars.ts, EVALUATION.md, apps/) and
+# the orchestration scripts — because harness-mode entrypoints (eval/start, run with sandbox OFF) need
+# them. The agent step (run-agent.ts) runs with src/sandbox.ts ON, whose default-deny whitelist denies
+# every path under /harness outside the checkout + otel/ — so the answer key is present-but-unreadable
+# to the agent, exactly the posture of a host run.
 #
 # Build order (rebuild base first whenever harness code or deps change, then the language images):
 #   docker build -f docker/agent-base.Dockerfile   -t harness-agent-base   .
@@ -22,10 +25,12 @@
 FROM node:22-bookworm-slim
 
 # Toolchain common to all languages: git + curl/xz for fetching weaver, build-essential for native
-# builds (Python wheels that compile, Go cgo, etc.).
+# builds (Python wheels that compile, Go cgo, etc.). lsof is required by the in-container lifecycle:
+# apps' cmd_start and traffic.sh probe ports with `lsof` (port_in_use), and the lifecycle waits on the
+# collector the same way.
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
-       ca-certificates curl git xz-utils build-essential \
+       ca-certificates curl git xz-utils build-essential lsof \
   && rm -rf /var/lib/apt/lists/*
 
 # Linux weaver — the agent runs `weaver registry live-check` to self-verify. The host's otel/weaver is
@@ -44,17 +49,37 @@ RUN set -eux; \
   rm -rf "/tmp/$asset"
 ENV PATH="/opt/weaver:${PATH}"
 
+# Linux otelcol-contrib — the per-run fan-out collector the in-container lifecycle (docker/lifecycle.sh)
+# launches: app -> collector -> {Honeycomb, weaver}. The host otel/otelcol-contrib is a macOS binary and
+# isn't mounted, so fetch the Linux build here (mirrors harness.sh download-tools: resolve the latest tag,
+# download otelcol-contrib_<ver>_linux_<arch>.tar.gz). aarch64 — host + Docker Desktop are arm64.
+RUN set -eux; \
+  arch="arm64"; \
+  ver="$(curl -fsSL https://api.github.com/repos/open-telemetry/opentelemetry-collector-releases/releases/latest \
+        | grep -m1 '"tag_name"' | sed -E 's/.*"v?([^"]+)".*/\1/')"; \
+  asset="otelcol-contrib_${ver}_linux_${arch}.tar.gz"; \
+  curl -fL -o "/tmp/$asset" \
+    "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v${ver}/${asset}"; \
+  tar -xzf "/tmp/$asset" -C /tmp; \
+  mv /tmp/otelcol-contrib /usr/local/bin/otelcol-contrib; \
+  chmod +x /usr/local/bin/otelcol-contrib; \
+  rm -rf "/tmp/$asset"
+
 WORKDIR /harness
 
 # Node deps first (cached unless the lockfile changes). package-lock.json is present in the repo.
 COPY package.json package-lock.json ./
 RUN npm ci
 
-# tsconfig + the agent-runtime source only. .dockerignore drops the eval answer-key files from src/,
-# so they are absent from the image entirely; everything the agent needs (run-agent → instrumentation
-# → sandbox/pricing) is import-reachable without them.
+# Full harness source, baked at /harness so paths resolve as on the host. src/ now includes the
+# answer-key files (evaluation.ts, weaver.ts, envvars.ts) — needed by harness-mode entrypoints and
+# denied to the agent by src/sandbox.ts. apps/ + EVALUATION.md + the orchestration scripts/templates
+# are baked for the same reason. (.env stays out via .dockerignore; secrets are forwarded by name.)
 COPY tsconfig.json ./
 COPY src/ ./src/
+COPY apps/ ./apps/
+COPY EVALUATION.md harness.sh ports.sh collector.run.template.yaml ./
+COPY docker/lifecycle.sh ./lifecycle.sh
 
 # Run as an arbitrary non-root uid at runtime (`docker run --user`) so files written into the
 # bind-mounted checkout stay host-owned. node_modules/.bin/tsx is world-readable from `npm ci`.

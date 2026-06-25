@@ -1,3 +1,6 @@
+import { runWeaverLiveCheck, weaverCriterion, type WeaverResult } from "./weaver.js";
+import { evaluateEnvVarOutput } from "./envvars.js";
+
 const HONEYCOMB_BASE = "https://api.honeycomb.io/1";
 const HONEYCOMB_ENV = process.env.HONEYCOMB_ENV ?? "test";
 
@@ -458,4 +461,37 @@ export async function evaluate(
       value: logsRows === null ? "column absent" : logCount,
     },
   };
+}
+
+// The full per-run verdict: the merged criteria (recorded + scored) plus the raw weaver result the
+// caller needs for weaver.* span attributes and the run record's `weaver` field.
+export interface FullEvaluation {
+  criteria: EvaluationResults;
+  weaver: WeaverResult;
+}
+
+// Compute every criterion for a run: the Honeycomb-query criteria (evaluate), the weaver live-check
+// verdict (runWeaverLiveCheck), and the agent's env-var communication (evaluateEnvVarOutput), merged
+// into one EvaluationResults. Shared by the host path (run.ts) and the in-container scorer
+// (run-eval.ts) so both produce byte-identical results regardless of where evaluation runs.
+export async function evaluateAll(
+  app: string,
+  dataset: string,
+  apiKey: string,
+  runId: string,
+  harnessRoot: string,
+  repoDir: string
+): Promise<FullEvaluation> {
+  // evaluate() reads Honeycomb; runWeaverLiveCheck() finalizes the weaver OTLP receiver and parses
+  // its report. They're independent, so run them concurrently (matches the prior host behavior).
+  const [hc, weaver] = await Promise.all([
+    evaluate(dataset, apiKey, runId),
+    runWeaverLiveCheck(app),
+  ]);
+  const criteria: EvaluationResults = {
+    ...hc,
+    weaver_live_check: weaverCriterion(weaver),
+    env_var_output: evaluateEnvVarOutput(app, repoDir, harnessRoot),
+  };
+  return { criteria, weaver };
 }
