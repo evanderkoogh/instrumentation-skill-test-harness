@@ -12,7 +12,7 @@
 import { spawn } from "node:child_process";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
-import { readFileSync, rmSync, mkdirSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, rmSync, mkdirSync, existsSync } from "fs";
 import { homedir, tmpdir } from "os";
 import type { AgentMetrics, SkillVersion } from "./instrumentation.js";
 import type { FullEvaluation } from "./evaluation.js";
@@ -49,11 +49,9 @@ const hostSolrDir = (): string => resolve(tmpdir(), SOLR_DIR_NAME); // macOS jav
 // Extra `docker run` args some apps/languages need on top of the standard mounts. Kept narrow so the
 // isolation story stays intact:
 //  - java: bind the host ~/.m2 cache (RW) into the container's HOME so Maven reuses ~1 GB of deps
-//    instead of re-downloading them every broadleaf run. AND force the JVM's `user.home` to the
-//    container HOME: under `--user <uid>` there's no /etc/passwd entry, so the JVM can't resolve
-//    user.home (it becomes "?") and Maven would look for `.m2` at `<cwd>/?/.m2` instead of the mount,
-//    failing with "Could not create local repository". JAVA_TOOL_OPTIONS is honored by every JVM
-//    (mvn build, spring-boot:run), so this fixes the build, bootstrap, and start invocations at once.
+//    instead of re-downloading them every broadleaf run. (The JVM's `user.home` — which Maven uses to
+//    locate ~/.m2 — now resolves to containerHome on its own, because passwdMountArgs gives the run uid
+//    a real /etc/passwd entry whose home field is containerHome; no -Duser.home override is needed.)
 //  - broadleaf: bind the host-seeded HSQLDB (`harness.sh broadleaf bootstrap` writes it to
 //    /tmp/broadleaf-hsqldb, a Broadleaf framework default) at the same path inside the container's
 //    isolated /tmp, so the agent's verification boot finds the correct schema; and the Solr cache
@@ -62,13 +60,34 @@ function extraDockerArgs(app: string, language: string, containerHome: string): 
   const args: string[] = [];
   if (language === "java") {
     args.push("-v", `${resolve(homedir(), ".m2")}:${containerHome}/.m2`);
-    args.push("-e", `JAVA_TOOL_OPTIONS=-Duser.home=${containerHome}`);
   }
   if (app === "broadleaf") {
     args.push("-v", "/tmp/broadleaf-hsqldb:/tmp/broadleaf-hsqldb");
     args.push("-v", `${hostSolrDir()}:${CONTAINER_SOLR_DIR}`);
   }
   return args;
+}
+
+// Both container launches run with `--user <host-uid>:<host-gid>`, and the base image has no
+// /etc/passwd entry for that (run-time-only) uid. Any program that resolves the current OS user then
+// fails — notably Go's standard `resource.WithProcess()` → `os/user.Current()`, whose error aborts
+// OTel init so the app emits ZERO spans and the verifier reports a false FAIL. (It also gives the JVM a
+// real `user.home`, which is why the java path no longer needs a -Duser.home override; see
+// extraDockerArgs.) Generate a minimal passwd/group pair for the exact run uid and bind-mount them
+// read-only — language-agnostic, works for
+// an arbitrary host uid, and (like the Java fix) lives in the docker args so no image rebuild is
+// needed. The host uid is stable, so a single shared tmp/.passwd is fine even under --parallel
+// (every run writes identical content). Replaces the image's stock passwd, which is safe here: the
+// container only ever runs as the host uid, never the image's build-time/system accounts.
+function passwdMountArgs(uid: number, gid: number, containerHome: string): string[] {
+  const passwdFile = resolve(harnessRoot, "tmp", ".passwd");
+  const groupFile = resolve(harnessRoot, "tmp", ".group");
+  writeFileSync(
+    passwdFile,
+    `root:x:0:0:root:/root:/bin/bash\nagent:x:${uid}:${gid}:agent:${containerHome}:/bin/sh\n`
+  );
+  writeFileSync(groupFile, `root:x:0:\nagent:x:${gid}:\n`);
+  return ["-v", `${passwdFile}:/etc/passwd:ro`, "-v", `${groupFile}:/etc/group:ro`];
 }
 
 // Secrets are forwarded by NAME (`-e KEY`, no value) so they never land on the docker argv /
@@ -79,6 +98,12 @@ const SECRET_ENV = [
   "ANTHROPIC_AUTH_TOKEN",
   "CLAUDE_CODE_OAUTH_TOKEN",
   "ANTHROPIC_BASE_URL",
+  // The verifier sub-agent queries Honeycomb via the (key-authed) Honeycomb MCP configured in
+  // instrumentation.ts; forward only the MCP management key (<KEY_ID>:<SECRET_KEY>). We deliberately
+  // do NOT forward HONEYCOMB_QUERY_API_KEY here: with no REST query key in the container, the verifier
+  // can't hand-roll `curl` queries (it must use the MCP), and the key never lands in the agent's logs
+  // or telemetry. (The lifecycle step forwards HONEYCOMB_QUERY_API_KEY separately for run-eval.)
+  "HONEYCOMB_MCP_KEY",
 ];
 
 export async function runInstrumentationInContainer(
@@ -123,12 +148,20 @@ export async function runInstrumentationInContainer(
   // filled it. (See CONTAINER_SOLR_DIR / hostSolrDir.)
   if (app === "broadleaf") mkdirSync(hostSolrDir(), { recursive: true });
 
+  const uid = process.getuid?.() ?? 0;
+  const gid = process.getgid?.() ?? 0;
   const args = [
     "run",
     "--rm",
+    // Named so `run.ts kill <app>` can `docker stop` a detached container (a killed run process
+    // doesn't reap the `docker run` container itself).
+    "--name",
+    `harness-agent-${app}`,
     // Write checkout edits as the host user so the subsequent host-side build/git stay clean.
     "--user",
-    `${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0}`,
+    `${uid}:${gid}`,
+    // Give the run uid a real /etc/passwd entry (no-passwd --user breaks os/user.Current() → OTel init).
+    ...passwdMountArgs(uid, gid, containerHome),
     "--add-host",
     "host.docker.internal:host-gateway",
     // Mounts — paths mirror the in-image /harness layout so instrumentation.ts resolves unchanged.
@@ -230,12 +263,19 @@ export async function runLifecycleInContainer(
   // collector, not directly to Honeycomb). Captured from the harness env; key forwarded by name below.
   const hcEndpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT || "https://api.honeycomb.io";
 
+  const uid = process.getuid?.() ?? 0;
+  const gid = process.getgid?.() ?? 0;
   const args = [
     "run",
     "--rm",
+    // Named so `run.ts kill <app>` can `docker stop` a detached container.
+    "--name",
+    `harness-lifecycle-${app}`,
     // Write checkout/log/tmp edits as the host user so subsequent host-side git/scoring stay clean.
     "--user",
-    `${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0}`,
+    `${uid}:${gid}`,
+    // Give the run uid a real /etc/passwd entry (no-passwd --user breaks os/user.Current() → OTel init).
+    ...passwdMountArgs(uid, gid, containerHome),
     // Mounts mirror the in-image /harness layout so paths resolve unchanged. All RW: the app writes a
     // DB/log into its checkout, the collector/weaver write logs + report into logs/<app>, and run-eval
     // writes the results into tmp/.

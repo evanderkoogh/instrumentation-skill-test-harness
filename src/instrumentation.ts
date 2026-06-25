@@ -48,8 +48,9 @@ export interface AgentMetrics {
   // The agent SDK's own cost figure, when it reports one — a cross-check
   // against our token-derived `cost.total_usd`.
   sdk_cost_usd: number | null;
-  // How many times the conductor spawned an `otel-verifier` sub-agent. 1 = instrument →
-  // verify → PASS on the first try; >1 = at least one FAIL drove a fix/re-verify cycle.
+  // How many times the conductor spawned a verification sub-agent (one following the
+  // otel-verification skill). 1 = instrument → verify → PASS on the first try; >1 = at least one
+  // FAIL drove a fix/re-verify cycle.
   // Informational only (not a pass/fail criterion) — a window into instrumentation churn.
   verifier_invocations: number;
   model: string;
@@ -135,9 +136,30 @@ export async function runInstrumentation(
         // repo (not the stale version-pinned cache) so the current skills + agents — including
         // otel-verification and the orchestrator agents — are discoverable. The harness defines
         // nothing itself; everything it exercises is shipped in the plugin.
-        allowedTools: ["Read", "Write", "Edit", "Bash", "Agent", "Task"],
+        allowedTools: ["Read", "Write", "Edit", "Bash", "Agent", "Task", "mcp__honeycomb__*"],
         skills: "all",
         plugins: [{ type: "local", path: pluginRoot }],
+        // Attach the Honeycomb MCP at the SESSION level. The conductor (instrumentation-agent)
+        // spawns the plugin's own `otel-instrumenter` / `otel-verifier` sub-agents — those are the
+        // deliverable we're testing, so we must let THEM run (not shadow them with harness copies).
+        // Sub-agents inherit the session-level `mcpServers`, so the verifier picks up this server via
+        // the `mcp__honeycomb__*` tools its frontmatter already allows — exactly as it would in a real
+        // Claude Code session where the user's Honeycomb MCP is configured session-wide.
+        //
+        // Auth: the container can't run the hosted MCP's interactive OAuth, so we authenticate by API
+        // key in the header. It must be a Honeycomb **management** key in <KEY_ID>:<SECRET_KEY> form
+        // (HONEYCOMB_MCP_KEY) — a classic single-string query key 401s the MCP. The REST query key is
+        // deliberately NOT in the container (see container.ts), so the MCP is the verifier's only path
+        // to Honeycomb.
+        mcpServers: {
+          honeycomb: {
+            type: "http",
+            url: process.env.HONEYCOMB_MCP_URL ?? "https://mcp.honeycomb.io/mcp",
+            headers: {
+              Authorization: `Bearer ${process.env.HONEYCOMB_MCP_KEY ?? ""}`,
+            },
+          },
+        },
         cwd: repoDir,
         maxTurns: 150,
         hooks: {
@@ -225,8 +247,8 @@ export async function runInstrumentation(
             if (type === "tool_use") {
               toolUses++;
               const b = block as { type: string; name: string; input: Record<string, unknown> };
-              // A Task/Agent spawn targeting otel-verifier is one verification pass; >1 means
-              // a FAIL drove a re-verify cycle. subagent_type may carry a plugin prefix.
+              // The conductor spawns the `otel-verifier` sub-agent for each verification pass; >1
+              // means a FAIL drove a re-verify cycle. (subagent_type may carry a plugin prefix.)
               if (
                 (b.name === "Task" || b.name === "Agent") &&
                 String(b.input.subagent_type ?? "").includes("otel-verifier")

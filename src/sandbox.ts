@@ -68,24 +68,25 @@ export function makeFsGuard(ctx: GuardContext) {
   const pluginsDir = resolve(homedir(), ".claude", "plugins");
   const pluginCacheDir = resolve(pluginsDir, "cache");
 
-  // A skill's `references/` files (e.g. skills/<name>/references/<lang>.md) are real skill content
-  // the agent is *meant* to read — but, unlike SKILL.md, the runtime does NOT inject them, so the
-  // agent can only get them by reading the file. Allow that (whether it resolves the live plugin
-  // path or the harness's agent-skill copy), with two safeguards: never from the stale plugin
-  // *cache* (a globally-installed copy would mislead/invalidate the run), and it can't expose the
-  // eval answer key, which never lives in a skills/.../references/ path (EVALUATION.md and
-  // src/evaluation.ts are elsewhere in the harness tree). SKILL.md itself stays blocked — it
-  // reaches the agent through the runtime, not by reading the file.
-  const isSkillReference = (absPath: string): boolean => {
+  // A skill's own files — its SKILL.md AND any references/ files (anything under skills/<name>/) —
+  // are real skill content the agent is *meant* to read and follow. The conductor
+  // (instrumentation-agent) hands its sub-agents a concrete SKILL.md path and tells them to read it
+  // directly, so that read must be allowed: the runtime only injects a skill when IT triggers the
+  // skill, not for a path handed to a spawned sub-agent. Allow any file under skills/<name>/ (whether
+  // it resolves the live plugin path or the harness's agent-skill copy), with two safeguards: never
+  // from the stale plugin *cache* (a globally-installed copy would mislead/invalidate the run), and
+  // this can't expose the eval answer key — that never lives under a skills/ path (EVALUATION.md and
+  // src/evaluation.ts are elsewhere in the harness tree).
+  const isSkillContent = (absPath: string): boolean => {
     if (isInside(pluginCacheDir, absPath)) return false;
-    return /(?:^|\/)skills\/[^/]+\/references\/[^/]+/.test(absPath);
+    return /(?:^|\/)skills\/[^/]+\/.+/.test(absPath);
   };
 
   // Blocked = the agent's plugins tree, OR inside the harness tree but not in an allowed root —
-  // except a skill's reference files, which are allowed (see isSkillReference).
+  // except a skill's own files, which are allowed (see isSkillContent).
   // Other paths outside the harness (system libs, dep caches, /tmp, the rest of $HOME) are fine.
   const isBlocked = (absPath: string): boolean => {
-    if (isSkillReference(absPath)) return false;
+    if (isSkillContent(absPath)) return false;
     if (isInside(pluginsDir, absPath)) return true;
     if (!isInside(ctx.harnessRoot, absPath)) return false;
     return !allowedRoots.some((root) => isInside(root, absPath));

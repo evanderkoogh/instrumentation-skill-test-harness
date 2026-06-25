@@ -2,7 +2,7 @@ import { config } from "dotenv";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
 import { writeFileSync, readdirSync, readFileSync, appendFileSync, mkdirSync, rmSync } from "fs";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   harness,
   readAppConfig,
@@ -145,6 +145,14 @@ async function killRuns(targets: string[]): Promise<void> {
     }
     rmSync(runPidFile(app), { force: true });
     try { harness(app, "stop"); } catch { /* best-effort cleanup of servers/collector/weaver */ }
+    // Killing the run process doesn't reap the detached `docker run` container it spawned (the agent
+    // or lifecycle phase), so stop those by their well-known names too. Best-effort: a name that
+    // isn't running just makes `docker stop` exit non-zero, which we ignore.
+    for (const name of [`harness-agent-${app}`, `harness-lifecycle-${app}`]) {
+      try {
+        spawnSync("docker", ["stop", name], { stdio: "ignore" });
+      } catch { /* docker not installed / not running — nothing to reap */ }
+    }
   }
   console.log("Done.");
 }
