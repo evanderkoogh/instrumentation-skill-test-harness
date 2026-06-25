@@ -5,19 +5,20 @@
 # `ps`/`lsof`/`kill` disambiguation. Inside a container it has its own PID + network namespace, so the
 # portable skill's generic process/port commands only ever see the agent's own world.
 #
-# This base holds everything common to every language image: the Node runtime that drives the Agent
-# SDK, the Linux weaver the agent self-verifies with, the harness's Node deps, and the harness CODE
-# baked at /harness so paths resolve exactly as on the host (harnessRoot=/harness,
-# repoDir=/harness/checkouts/<app>, pluginRoot=/harness/agent-skill/honeycomb) — letting
-# src/instrumentation.ts and src/sandbox.ts run unchanged. Per-language images (docker/agent-<lang>.
-# Dockerfile) are `FROM harness-agent-base` and add ONLY that language's toolchain.
+# This base holds only what's common AND slow-changing across every language image: the Node runtime
+# that drives the Agent SDK, the Linux weaver + otelcol the agent/lifecycle use, and the harness's Node
+# deps (npm ci). It deliberately does NOT bake the harness SOURCE — each per-language image
+# (docker/agent-<lang>.Dockerfile) copies that as its LAST layers, AFTER the toolchain install. Keeping
+# the volatile source out of the shared base means a harness-code edit busts only the cheap COPY layers
+# in each language image, never the toolchain downloads (Go tarball, JDK/Maven, uv) — those stay cached.
 #
-# At runtime the checkout, tmp/, and the skill tree are bind-mounted in. The FULL harness code is baked
-# — including the eval "answer key" (src/evaluation.ts, weaver.ts, envvars.ts, EVALUATION.md, apps/) and
-# the orchestration scripts — because harness-mode entrypoints (eval/start, run with sandbox OFF) need
-# them. The agent step (run-agent.ts) runs with src/sandbox.ts ON, whose default-deny whitelist denies
-# every path under /harness outside the checkout + otel/ — so the answer key is present-but-unreadable
-# to the agent, exactly the posture of a host run.
+# The language images therefore bake the FULL harness code at /harness (paths resolve as on the host:
+# harnessRoot=/harness, repoDir=/harness/checkouts/<app>, pluginRoot=/harness/agent-skill/honeycomb) —
+# including the eval "answer key" (src/evaluation.ts, weaver.ts, envvars.ts, EVALUATION.md, apps/) and
+# the orchestration scripts, needed by harness-mode entrypoints. The agent step (run-agent.ts) runs with
+# src/sandbox.ts ON, whose default-deny whitelist denies every /harness path outside the checkout +
+# otel/ — so the answer key is present-but-unreadable to the agent, exactly the posture of a host run.
+# At runtime the checkout, tmp/, and the skill tree are bind-mounted in.
 #
 # Build order (rebuild base first whenever harness code or deps change, then the language images):
 #   docker build -f docker/agent-base.Dockerfile   -t harness-agent-base   .
@@ -71,15 +72,9 @@ WORKDIR /harness
 COPY package.json package-lock.json ./
 RUN npm ci
 
-# Full harness source, baked at /harness so paths resolve as on the host. src/ now includes the
-# answer-key files (evaluation.ts, weaver.ts, envvars.ts) — needed by harness-mode entrypoints and
-# denied to the agent by src/sandbox.ts. apps/ + EVALUATION.md + the orchestration scripts/templates
-# are baked for the same reason. (.env stays out via .dockerignore; secrets are forwarded by name.)
-COPY tsconfig.json ./
-COPY src/ ./src/
-COPY apps/ ./apps/
-COPY EVALUATION.md harness.sh ports.sh collector.run.template.yaml ./
-COPY docker/lifecycle.sh ./lifecycle.sh
+# NOTE: the harness SOURCE is intentionally NOT copied here — each agent-<lang> image copies it as its
+# final layers, after the toolchain, so a code edit doesn't invalidate the toolchain cache. The
+# ENTRYPOINT below resolves against that per-language copy at runtime (base is never run directly).
 
 # Run as an arbitrary non-root uid at runtime (`docker run --user`) so files written into the
 # bind-mounted checkout stay host-owned. node_modules/.bin/tsx is world-readable from `npm ci`.

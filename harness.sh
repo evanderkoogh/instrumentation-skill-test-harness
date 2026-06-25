@@ -532,13 +532,15 @@ harness_traffic() {
 }
 
 harness_instrument() {
-  # The marketplace symlink points at the in-development skill repo; the extracted
-  # plugin cache is a (potentially stale) published copy. Read CONTENT from the
-  # marketplace path so runs exercise the same skill the version metadata is taken
-  # from. Fall back to the cache only if the marketplace layout isn't present.
+  # We bake the CONDUCTOR agent (instrumentation-agent) as the prompt, not a skill: it runs the
+  # full engagement, spawning an implementer (otel-instrumentation skill) and an independent
+  # verifier (otel-verification skill) as sub-agents. The marketplace symlink points at the
+  # in-development skill repo; the extracted plugin cache is a (potentially stale) published copy.
+  # Read CONTENT from the marketplace path so runs exercise the same agent the version metadata is
+  # taken from. Fall back to the cache only if the marketplace layout isn't present.
   local skill_git_root="$HOME/.claude/plugins/marketplaces/honeycomb-plugins"
   local claude_plugin_root="$skill_git_root/honeycomb"
-  local skill_file="$claude_plugin_root/skills/otel-instrumentation/SKILL.md"
+  local skill_file="$claude_plugin_root/agents/instrumentation-agent.md"
   if [[ ! -f "$skill_file" ]]; then
     local plugin_base="$HOME/.claude/plugins/cache/honeycomb-plugins/honeycomb"
     local latest_version
@@ -549,10 +551,10 @@ harness_instrument() {
     else
       claude_plugin_root="$plugin_link"
     fi
-    skill_file="$claude_plugin_root/skills/otel-instrumentation/SKILL.md"
+    skill_file="$claude_plugin_root/agents/instrumentation-agent.md"
   fi
   if [[ ! -f "$skill_file" ]]; then
-    echo "Skill not found at: $skill_file" >&2
+    echo "Conductor agent not found at: $skill_file" >&2
     exit 1
   fi
 
@@ -572,8 +574,11 @@ harness_instrument() {
   # layout so src/instrumentation.ts computes the identical pluginRoot), so bake THAT into the prompt.
   local subst_plugin_root="${HARNESS_CONTAINER_PLUGIN_ROOT:-/harness/agent-skill/honeycomb}"
 
+  # Bake the agent BODY only — drop the YAML frontmatter (name/description/tools are agent config,
+  # not prompt) — and resolve ${CLAUDE_PLUGIN_ROOT} so the conductor can hand sub-agents real paths.
   local skill_content
-  skill_content=$(sed "s|\${CLAUDE_PLUGIN_ROOT}|$subst_plugin_root|g" "$skill_file")
+  skill_content=$(awk 'body{print} /^---[[:space:]]*$/{n++; if(n==2) body=1}' "$skill_file" \
+    | sed "s|\${CLAUDE_PLUGIN_ROOT}|$subst_plugin_root|g")
 
   # skill_git_root (the marketplace symlink → dev repo) is set at the top of this
   # function; it has a .git so we can read the branch/SHA the content came from.

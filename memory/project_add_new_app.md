@@ -1,8 +1,10 @@
 ---
 name: project-add-new-app
 description: Step-by-step instructions for adding a new application to the OTel skill test harness
-metadata:
+metadata: 
+  node_type: memory
   type: project
+  originSessionId: 1619c3f2-b96c-438b-b9ce-a60f2d656576
 ---
 
 ## Adding a new app to the harness
@@ -92,6 +94,24 @@ takes precedence over the skill's generic steps. If the new app's language/runti
 that list, decide whether to author a `references/<language>.md` guide and add it to the list in
 `agent-skill/honeycomb/skills/otel-instrumentation-implementation/SKILL.md` — the list is a
 maintenance point that won't update itself. See [[project-goal-portable-skills]].
+
+**New language/runtime also needs a `harness-agent-<lang>` Docker image.** Runs execute in
+per-language containers, so a new language requires `docker/agent-<lang>.Dockerfile` — `FROM
+harness-agent-base`, adding only that toolchain. **Critically, the base image does NOT bake the
+harness source**, so the new image must copy it as its **final layers, after the toolchain install**:
+
+```dockerfile
+WORKDIR /harness
+COPY tsconfig.json ./
+COPY src/ ./src/
+COPY apps/ ./apps/
+COPY EVALUATION.md harness.sh ports.sh collector.run.template.yaml ./
+COPY docker/lifecycle.sh ./lifecycle.sh
+```
+
+Without that block the agent + lifecycle entrypoints have no `/harness` code to run. Copy it verbatim
+from the existing python/go/java images, and keep it LAST so a harness-code edit doesn't bust the
+toolchain cache. `node` would also need its own image. See [[rebuild-images-after-harness-change]].
 
 ### Java / Spring Boot
 
