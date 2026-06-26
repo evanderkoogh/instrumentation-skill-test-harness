@@ -12,7 +12,7 @@
 import { spawn } from "node:child_process";
 import { resolve, dirname } from "path";
 import { fileURLToPath } from "url";
-import { readFileSync, writeFileSync, rmSync, mkdirSync, existsSync } from "fs";
+import { readFileSync, writeFileSync, rmSync, mkdirSync, existsSync, cpSync } from "fs";
 import { homedir, tmpdir } from "os";
 import type { AgentMetrics, SkillVersion } from "./instrumentation.js";
 import type { FullEvaluation } from "./evaluation.js";
@@ -45,6 +45,49 @@ function imageFor(app: string): string {
 const SOLR_DIR_NAME = "solr-8.11.3";
 const CONTAINER_SOLR_DIR = `/tmp/${SOLR_DIR_NAME}`; // Linux java.io.tmpdir/solr-<ver>
 const hostSolrDir = (): string => resolve(tmpdir(), SOLR_DIR_NAME); // macOS java.io.tmpdir/solr-<ver>
+
+// Durable, known-good Solr copy. The os.tmpdir() cache above is volatile (a reboot clears it) and
+// fragile (a run killed mid-download leaves a partial .tgz + half extraction, which Broadleaf treats
+// as absent and re-downloads — ~25 min on the throttled archive.apache.org mirror, looking like a
+// hung startup). So keep the verified tree alongside the other downloaded tooling in the gitignored
+// otel/ tree and self-heal the volatile cache from it. See memory: project-solr-known-good-cache.
+const DURABLE_SOLR_DIR = resolve(harnessRoot, "otel", SOLR_DIR_NAME);
+
+// A complete cache holds the tgz extracted into a nested solr-<ver>/ dir (Broadleaf extracts the
+// archive, whose top-level entry is solr-<ver>/, into the cache root — so the launch script lands at
+// <cacheDir>/solr-<ver>/bin/solr). A complete extraction has both the launch script and the server
+// bootstrap jar; a partial download / interrupted extraction has neither. Used as the integrity
+// marker so a half-trusted cache is treated as absent and reseeded rather than booted against.
+function solrCacheComplete(cacheDir: string): boolean {
+  const root = resolve(cacheDir, SOLR_DIR_NAME);
+  return existsSync(resolve(root, "bin", "solr")) && existsSync(resolve(root, "server", "start.jar"));
+}
+
+// Make broadleaf's Solr cache robust to killed/parallel runs and reboots. Runs host-side before each
+// broadleaf container launch (the boot that triggers the download happens inside the container, which
+// bind-mounts hostSolrDir() → CONTAINER_SOLR_DIR):
+//   - durable good + run cache missing/corrupt → reseed the run cache from the durable copy (self-heal)
+//   - durable absent + run cache good          → capture it as the durable known-good copy
+//   - neither good                             → leave it; Broadleaf downloads on first boot (slow path,
+//                                                 once per machine — captured durably on the next launch)
+// The ~225 MB copy only runs on the rare corrupt/first-good transition, never in the steady state.
+function ensureSolrCache(): void {
+  const runDir = hostSolrDir();
+  const durableGood = solrCacheComplete(DURABLE_SOLR_DIR);
+  const runGood = solrCacheComplete(runDir);
+
+  if (durableGood && !runGood) {
+    console.error(`[solr-cache] ${runDir} missing/corrupt — reseeding from durable ${DURABLE_SOLR_DIR}`);
+    rmSync(runDir, { recursive: true, force: true });
+    cpSync(DURABLE_SOLR_DIR, runDir, { recursive: true });
+  } else if (!durableGood && runGood) {
+    console.error(`[solr-cache] capturing known-good ${runDir} → durable ${DURABLE_SOLR_DIR}`);
+    rmSync(DURABLE_SOLR_DIR, { recursive: true, force: true });
+    cpSync(runDir, DURABLE_SOLR_DIR, { recursive: true });
+  }
+  // Always leave a host-owned run-cache dir for the bind mount, even on the cold first-boot path.
+  mkdirSync(runDir, { recursive: true });
+}
 
 // Extra `docker run` args some apps/languages need on top of the standard mounts. Kept narrow so the
 // isolation story stays intact:
@@ -143,10 +186,9 @@ export async function runInstrumentationInContainer(
   // Pre-create host-side so it's owned by the host uid; otherwise docker creates the mount point as
   // root and the --user agent can't write HOME (.cache, .config, GOPATH, …).
   mkdirSync(hostHomeDir, { recursive: true });
-  // Same for broadleaf's Solr cache dir — pre-create host-side (host's java.io.tmpdir/solr-<ver>) so
-  // a fresh machine gets a host-owned dir the first run can populate; existing host runs already
-  // filled it. (See CONTAINER_SOLR_DIR / hostSolrDir.)
-  if (app === "broadleaf") mkdirSync(hostSolrDir(), { recursive: true });
+  // Seed/self-heal broadleaf's Solr cache from the durable known-good copy (and capture the first good
+  // copy back to it), leaving a host-owned run-cache dir for the bind mount. (See ensureSolrCache.)
+  if (app === "broadleaf") ensureSolrCache();
 
   const uid = process.getuid?.() ?? 0;
   const gid = process.getgid?.() ?? 0;
@@ -257,7 +299,7 @@ export async function runLifecycleInContainer(
   const containerHome = "/home/agent";
   const hostHomeDir = resolve(tmpDir, `.home-${app}`);
   mkdirSync(hostHomeDir, { recursive: true });
-  if (app === "broadleaf") mkdirSync(hostSolrDir(), { recursive: true });
+  if (app === "broadleaf") ensureSolrCache(); // seed/self-heal/capture (see ensureSolrCache)
 
   // The real Honeycomb destination the in-container collector forwards to (the app exports to the
   // collector, not directly to Honeycomb). Captured from the harness env; key forwarded by name below.
